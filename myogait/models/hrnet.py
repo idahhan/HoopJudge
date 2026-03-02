@@ -56,20 +56,25 @@ class HRNETPoseExtractor(BasePoseExtractor):
 
     @staticmethod
     def _ensure_mmcv():
-        """Auto-install mmcv via openmim if missing (PyPI has no Windows wheels)."""
+        """Auto-install mmcv prebuilt wheel from OpenMMLab if missing."""
         try:
             import mmcv  # noqa: F401
         except ImportError:
-            logger.info("mmcv not found — installing via openmim (first run only)...")
             import subprocess
             import sys
-            # setuptools provides pkg_resources required by mmcv build
+            # Detect torch version and CUDA to pick the right prebuilt wheel.
+            try:
+                import torch
+                tv = ".".join(torch.__version__.split(".")[:2])  # e.g. "2.6"
+                cu = torch.version.cuda
+                cu_tag = f"cu{cu.replace('.', '')}" if cu else "cpu"
+            except Exception:
+                tv, cu_tag = "2.6", "cpu"
+            index = f"https://download.openmmlab.com/mmcv/dist/{cu_tag}/torch{tv}/index.html"
+            logger.info("mmcv not found — installing from %s …", index)
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "setuptools"],
-                stdout=subprocess.DEVNULL,
-            )
-            subprocess.check_call(
-                [sys.executable, "-m", "mim", "install", "mmcv"],
+                [sys.executable, "-m", "pip", "install", "mmcv==2.2.0",
+                 "-f", index],
                 stdout=subprocess.DEVNULL,
             )
             logger.info("mmcv installed successfully.")
