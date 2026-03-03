@@ -703,11 +703,11 @@ def correct_pixel_ratio(
 
 
 def confidence_filter(
-    df: pd.DataFrame,
+    df,
     threshold: float = 0.3,
     _data_frames: list = None,
     **kwargs,
-) -> pd.DataFrame:
+):
     """Filter landmarks by visibility confidence, setting low-confidence coords to NaN.
 
     For each frame, checks each landmark's visibility from the original frame
@@ -719,7 +719,8 @@ def confidence_filter(
     detections that the model itself reports as uncertain.
 
     Args:
-        df: DataFrame with LANDMARK_x, LANDMARK_y, LANDMARK_visibility columns.
+        df: Pivot JSON dict (from extract()) **or** DataFrame with
+            LANDMARK_x, LANDMARK_y, LANDMARK_visibility columns.
         threshold: Minimum visibility score in [0, 1]. Landmarks with
             visibility < threshold have their x/y set to NaN. Default 0.3.
         _data_frames: Original frame dicts (list) from data["frames"].
@@ -727,8 +728,21 @@ def confidence_filter(
             the _visibility columns already present in df.
 
     Returns:
-        Modified DataFrame with low-confidence coordinates set to NaN.
+        Modified dict or DataFrame (same type as input) with low-confidence
+        coordinates set to NaN.
     """
+    # Accept pivot JSON dict transparently
+    if isinstance(df, dict):
+        data = df
+        frames = data.get("frames", [])
+        for frame in frames:
+            for name, coords in frame.get("landmarks", {}).items():
+                vis = coords.get("visibility", 1.0)
+                if vis is not None and vis < threshold:
+                    coords["x"] = float("nan")
+                    coords["y"] = float("nan")
+        return data
+
     df = df.copy()
 
     # Determine unique landmark names from column suffixes
@@ -1162,10 +1176,12 @@ def data_quality_score(data: dict) -> dict:
 
     result = {
         "overall_score": round(overall, 2),
+        "score": round(overall, 2),
         "detection_rate": round(detection_rate, 4),
         "mean_confidence": round(mean_confidence, 4),
         "gap_pct": round(gap_pct, 4),
         "jitter_score": round(jitter_score, 6),
+        "jitter": round(jitter_score, 6),
     }
     data["quality"] = result
     return result
