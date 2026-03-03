@@ -6,7 +6,8 @@ Generates a multi-page clinical PDF report with:
 - Page 2: Bilateral comparison -- mean +/- SD overlaid L vs R.
 - Page 3: Clinical statistics -- symmetry and variability bar charts.
 - Page 4: Trunk and pelvis analysis with pathology annotations.
-- Pages 5-6: Normalized cycles per side (all cycles + mean +/- SD).
+- Page 5: Pathology detection results (Trendelenburg, spastic, etc.).
+- Pages 6-7: Normalized cycles per side (all cycles + mean +/- SD).
 - Page 7: Normative comparison.
 - Page 8: GVS/MAP profile.
 - Page 9: Quality dashboard.
@@ -121,6 +122,15 @@ _STRINGS = {
         "longitudinal_title": "Rapport longitudinal \u2014 Comparaison multi-sessions",
         "session": "Session",
         "frontal_title": "Comparaison plan frontal",
+        "pathology_title": "D\u00e9tection de pathologies",
+        "pathology_none": "Aucun pattern pathologique d\u00e9tect\u00e9.",
+        "pathology_pattern": "Pattern",
+        "pathology_side": "C\u00f4t\u00e9",
+        "pathology_severity": "S\u00e9v\u00e9rit\u00e9",
+        "pathology_value": "Valeur",
+        "pathology_confidence": "Confiance",
+        "pathology_description": "Description",
+        "bilateral": "Bilat\u00e9ral",
     },
     "en": {
         "title": "Gait Analysis Report",
@@ -203,6 +213,15 @@ _STRINGS = {
         "longitudinal_title": "Longitudinal Report \u2014 Multi-session Comparison",
         "session": "Session",
         "frontal_title": "Frontal Plane Comparison",
+        "pathology_title": "Pathology Detection",
+        "pathology_none": "No pathological gait pattern detected.",
+        "pathology_pattern": "Pattern",
+        "pathology_side": "Side",
+        "pathology_severity": "Severity",
+        "pathology_value": "Value",
+        "pathology_confidence": "Confidence",
+        "pathology_description": "Description",
+        "bilateral": "Bilateral",
     },
 }
 
@@ -259,6 +278,9 @@ def _page_overview(pdf, data: dict, cycles: dict, s: dict):
             if rom is None:
                 valid = [v for v in vals if not np.isnan(v)]
                 rom = (max(valid) - min(valid)) if valid else None
+                # Sanity clamp: physiological ROM never exceeds 180°
+                if rom is not None and rom > 180:
+                    rom = None
             if rom is not None:
                 ax.set_title(f"{label} {side_label}  (ROM: {rom:.1f}\u00b0)", fontsize=10, fontweight="bold")
             else:
@@ -506,6 +528,65 @@ def _page_trunk_pelvis(pdf, data: dict, s: dict):
     ax2.grid(True, alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
+    pdf.savefig(fig, dpi=_DPI)
+    plt.close(fig)
+
+
+def _page_pathologies(pdf, stats: dict, s: dict):
+    """Pathology detection results page."""
+    pathologies = stats.get("pathologies", [])
+    fig = plt.figure(figsize=_FIG_SIZE)
+    fig.suptitle(s["pathology_title"], fontsize=14, fontweight="bold", y=0.99)
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+
+    if not pathologies:
+        ax.text(
+            0.5, 0.5, s["pathology_none"], ha="center", va="center",
+            transform=ax.transAxes, fontsize=14,
+            bbox=dict(boxstyle="round", facecolor="lightgreen", alpha=0.4),
+        )
+    else:
+        side_map = {"left": s["left"], "right": s["right"],
+                    "bilateral": s["bilateral"]}
+        col_headers = [
+            s["pathology_pattern"], s["pathology_side"],
+            s["pathology_severity"], s["pathology_value"],
+            s["pathology_confidence"], s["pathology_description"],
+        ]
+        cell_data = []
+        for p in pathologies:
+            cell_data.append([
+                p.get("pattern", "").capitalize(),
+                side_map.get(p.get("side", ""), p.get("side", "")),
+                p.get("severity", ""),
+                f"{p.get('value', '')}",
+                f"{p.get('confidence', 0):.0%}",
+                p.get("description", ""),
+            ])
+
+        table = ax.table(
+            cellText=cell_data, colLabels=col_headers,
+            loc="upper center", cellLoc="left",
+            colWidths=[0.10, 0.10, 0.10, 0.08, 0.10, 0.42],
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.8)
+        for key, cell in table.get_celld().items():
+            if key[0] == 0:
+                cell.set_facecolor("#4472C4")
+                cell.set_text_props(color="white", fontweight="bold")
+            else:
+                sev = cell_data[key[0] - 1][2] if key[0] - 1 < len(cell_data) else ""
+                if sev == "severe":
+                    cell.set_facecolor("#FFCCCC")
+                elif sev == "moderate":
+                    cell.set_facecolor("#FFE5CC")
+                else:
+                    cell.set_facecolor("#FFFFCC")
+
+    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.05, right=0.95)
     pdf.savefig(fig, dpi=_DPI)
     plt.close(fig)
 
@@ -793,6 +874,7 @@ def generate_report(
         _page_bilateral(pdf, cycles, data, s)
         _page_statistics(pdf, stats, s)
         _page_trunk_pelvis(pdf, data, s)
+        _page_pathologies(pdf, stats, s)
         _page_normalized_cycles(pdf, cycles, "left", data, s)
         _page_normalized_cycles(pdf, cycles, "right", data, s)
         _page_normative(pdf, cycles, data, s)

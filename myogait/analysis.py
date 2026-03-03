@@ -872,7 +872,14 @@ def detect_pathologies(data: dict, cycles: dict) -> List[dict]:
     pelvis_vals = [af.get("pelvis_tilt") for af in angle_frames
                    if af.get("pelvis_tilt") is not None]
     if pelvis_vals:
-        pelvis_range = np.ptp([v for v in pelvis_vals if not np.isnan(v)])
+        valid_pelvis = np.array([v for v in pelvis_vals if not np.isnan(v)])
+        # Unwrap to remove 360° discontinuities (belt-and-suspenders)
+        if len(valid_pelvis) > 1:
+            valid_pelvis = np.degrees(np.unwrap(np.radians(valid_pelvis)))
+        pelvis_range = float(np.ptp(valid_pelvis)) if len(valid_pelvis) > 0 else 0.0
+        # Sanity: physiological pelvis range never exceeds 90°
+        if pelvis_range > 90:
+            pelvis_range = 0.0
         if pelvis_range > 10:
             confidence = min(1.0, max(0.0, (float(pelvis_range) - 10.0) / 10.0))
             pathologies.append({

@@ -1320,6 +1320,7 @@ def plot_session_comparison(
     session_b: dict,
     joints: Optional[List[str]] = None,
     figsize: Optional[tuple] = None,
+    labels: Optional[List[str]] = None,
 ) -> plt.Figure:
     """Compare two walking sessions side by side.
 
@@ -1338,11 +1339,19 @@ def plot_session_comparison(
         Joint names (default ``['hip', 'knee', 'ankle']``).
     figsize : tuple, optional
         Figure size ``(width, height)`` in inches.
+    labels : list of str, optional
+        Display names for [session_a, session_b].  Overrides the
+        ``'label'`` key inside each session dict.
 
     Returns
     -------
     matplotlib.figure.Figure
     """
+    if labels is not None:
+        if len(labels) >= 1:
+            session_a = {**session_a, "label": labels[0]}
+        if len(labels) >= 2:
+            session_b = {**session_b, "label": labels[1]}
     if joints is None:
         joints = ["hip", "knee", "ankle"]
 
