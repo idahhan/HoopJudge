@@ -779,8 +779,8 @@ def _convert_to_gaitkit_frames(data: dict) -> list:
         "RIGHT_ANKLE": "right_ankle",
         "LEFT_HEEL": "left_heel",
         "RIGHT_HEEL": "right_heel",
-        "LEFT_FOOT_INDEX": "left_foot_index",
-        "RIGHT_FOOT_INDEX": "right_foot_index",
+        "LEFT_FOOT_INDEX": "left_toe",
+        "RIGHT_FOOT_INDEX": "right_toe",
     }
 
     # Determine source: prefer angles if available, fall back to frames
@@ -813,10 +813,14 @@ def _convert_to_gaitkit_frames(data: dict) -> list:
             lp = af.get("landmark_positions", {})
             gk_landmarks = {}
             for gk_name, coords in lp.items():
-                # coords is [x, y, visibility] in myogait
+                # coords is [x, y, visibility] in myogait.
+                # gaitkit uses vert_axis=2 (z) for vertical features.
+                # For 2D video, y is the vertical axis (0=top, 1=bottom),
+                # so map to (x, 0.0, 1.0 - y) to give gaitkit a correct
+                # upward-positive vertical signal.
                 if isinstance(coords, (list, tuple)) and len(coords) >= 2:
                     gk_landmarks[gk_name] = (
-                        float(coords[0]), float(coords[1]), 0.0
+                        float(coords[0]), 0.0, 1.0 - float(coords[1])
                     )
             gk_frame["landmark_positions"] = gk_landmarks
         else:
@@ -842,7 +846,7 @@ def _convert_to_gaitkit_frames(data: dict) -> list:
                         y_val = lm.get("y", 0.0)
                         if not (isinstance(x_val, float) and np.isnan(x_val)):
                             existing_lp[gk_name] = (
-                                float(x_val), float(y_val), 0.0
+                                float(x_val), 0.0, 1.0 - float(y_val)
                             )
 
             gk_frame["landmark_positions"] = existing_lp
