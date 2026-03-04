@@ -1033,10 +1033,10 @@ def auto_cutoff_frequency(
 
 
 def detect_outliers(
-    df: pd.DataFrame,
+    df,
     z_thresh: float = 3.0,
     **kwargs,
-) -> pd.DataFrame:
+):
     """Detect spike outliers via z-score and replace with linear interpolation.
 
     For each coordinate column (_x / _y), computes the z-score of each value.
@@ -1045,13 +1045,26 @@ def detect_outliers(
     misdetections without affecting the overall trajectory shape.
 
     Args:
-        df: DataFrame with pose coordinate columns.
+        df: Pivot JSON dict (from extract()) **or** DataFrame with
+            pose coordinate columns.
         z_thresh: Z-score threshold for outlier detection. Values with
             |z| > z_thresh are treated as outliers. Default 3.0.
 
     Returns:
-        Modified DataFrame with outlier spikes interpolated away.
+        Modified dict or DataFrame (same type as input) with outlier
+        spikes interpolated away.
     """
+    # Accept pivot JSON dict transparently
+    if isinstance(df, dict):
+        data = df
+        frames = data.get("frames", [])
+        if not frames:
+            return data
+        df_inner = frames_to_dataframe(frames)
+        df_inner = detect_outliers(df_inner, z_thresh=z_thresh)
+        data["frames"] = dataframe_to_frames(df_inner, frames)
+        return data
+
     df = df.copy()
     cols = [c for c in df.columns if c.endswith("_x") or c.endswith("_y")]
 
