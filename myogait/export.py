@@ -1,12 +1,14 @@
 """Export gait data to various file formats.
 
-Provides functions to export myogait analysis results to CSV, OpenSim
-(.mot and .trc), and Excel workbook formats.
+Provides functions to export myogait analysis results to CSV, JSON,
+OpenSim (.mot and .trc), and Excel workbook formats.
 
 Functions
 ---------
 export_csv
     Export angles, events, cycles, and statistics to CSV files.
+export_json
+    Export full pivot data (including landmarks) to a JSON file.
 export_mot
     Export joint angles to OpenSim .mot (motion) format.
 export_trc
@@ -925,6 +927,82 @@ def to_dataframe(data: dict, what: str = "angles") -> "pd.DataFrame | dict":
             "landmarks": _landmarks_df(),
             "events": _events_df(),
         }
+
+
+# ── Full JSON export ─────────────────────────────────────────────────
+
+
+def export_json(
+    data: dict,
+    output_path: str,
+    cycles: Optional[dict] = None,
+    stats: Optional[dict] = None,
+    indent: int = 2,
+) -> str:
+    """Export the full pivot data (including landmarks) to a JSON file.
+
+    Writes the complete *data* dict — metadata, per-frame landmarks,
+    angles, events — plus optionally *cycles* and *stats*.  This is the
+    JSON counterpart of :func:`export_csv` / :func:`export_excel`.
+
+    Parameters
+    ----------
+    data : dict
+        Pivot JSON dict (output of the extraction/analysis pipeline).
+    output_path : str
+        Destination file path (e.g. ``"output/results.json"``).
+    cycles : dict, optional
+        Output of ``segment_cycles()``.  Merged under key ``"cycles"``.
+    stats : dict, optional
+        Output of ``analyze_gait()``.  Merged under key ``"stats"``.
+    indent : int, optional
+        JSON indentation level (default 2).
+
+    Returns
+    -------
+    str
+        Path to the created JSON file.
+    """
+    if not isinstance(data, dict):
+        raise TypeError("data must be a dict")
+
+    # Auto-detect cycles/stats from pipeline data when not passed
+    if cycles is None:
+        cycles = data.get("cycles_data")
+    if stats is None:
+        stats = data.get("stats")
+
+    output = {**data}
+    if cycles is not None:
+        output["cycles"] = cycles
+    if stats is not None:
+        output["stats"] = stats
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _default(obj):
+        """JSON serializer for numpy types."""
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=indent, ensure_ascii=False, default=_default)
+
+    n_frames = len(data.get("frames", []))
+    n_landmarks = 0
+    frames = data.get("frames", [])
+    if frames and frames[0].get("landmarks"):
+        n_landmarks = len(frames[0]["landmarks"])
+    logger.info("Exported JSON: %s (%d frames, %d landmarks)", path, n_frames, n_landmarks)
+    return str(path)
 
 
 # ── Summary JSON export ──────────────────────────────────────────────
