@@ -49,6 +49,30 @@ logger = logging.getLogger(__name__)
 _current_data: Optional[dict] = None
 
 
+def _remap_event_frames(events: dict, frames: list, fps: float) -> None:
+    """Remap array-index based event frames to actual frame_idx values.
+
+    Detection functions use ``find_peaks`` on arrays indexed 0..N-1 (position
+    in the ``frames`` list).  When the subject is not visible at the start of
+    the video the first extracted frame may have ``frame_idx >> 0``, causing a
+    mismatch with angle frames (which use the original video frame_idx).
+
+    This function converts in-place each event's ``frame`` from an array index
+    to the corresponding ``frame_idx`` and recalculates ``time`` accordingly.
+    """
+    # Build lookup: array position → original frame_idx
+    idx_map = [f.get("frame_idx", i) for i, f in enumerate(frames)]
+    n = len(idx_map)
+
+    for key in ("left_hs", "right_hs", "left_to", "right_to"):
+        for ev in events.get(key, []):
+            arr_idx = ev["frame"]
+            if 0 <= arr_idx < n:
+                real_idx = idx_map[arr_idx]
+                ev["frame"] = real_idx
+                ev["time"] = round(real_idx / fps, 4)
+
+
 def _extract_landmark_series(frames: list, name: str, coord: str = "x") -> np.ndarray:
     """Extract a single coordinate time series for a landmark."""
     values = []
@@ -1252,6 +1276,13 @@ def detect_events(
         events = detect_func(frames, fps, min_cycle_duration, cutoff_freq)
     finally:
         _current_data = None
+
+    # Remap array indices to actual frame_idx values.
+    # Detection functions return indices into the frames list (0..N-1),
+    # but frames may not start at 0 if the subject is absent at the
+    # beginning of the video.  segment_cycles matches events to angle
+    # frames by frame_idx, so they must agree.
+    _remap_event_frames(events, frames, fps)
 
     n_events = sum(len(v) for v in events.values())
     logger.info(
