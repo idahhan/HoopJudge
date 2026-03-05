@@ -26,7 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .constants import OPENSIM_MARKER_MAP, EXTENDED_FOOT_LANDMARKS
+from .constants import OPENSIM_MARKER_MAP, EXTENDED_FOOT_LANDMARKS, MP_LANDMARK_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -749,6 +749,179 @@ def export_excel(
                 pd.DataFrame(rows).to_excel(writer, sheet_name="Stats", index=False)
 
     logger.info(f"Exported Excel: {path}")
+    return str(path)
+
+
+def export_landmarks_excel(
+    data: dict,
+    output_path: str,
+    cycles: Optional[dict] = None,
+) -> str:
+    """Export landmarks and angles to an Excel workbook (AUDR format).
+
+    Produces a flat table with one row per frame and columns
+    ``{LANDMARK}_{x,y,z,visibility}`` for all 33 MediaPipe landmarks,
+    followed by video metadata (``fps``, ``width``, ``height``) and
+    joint angles.  An optional ``Gait_Steps`` sheet lists gait cycles.
+
+    This format is compatible with the IDM analysis interface.
+
+    Parameters
+    ----------
+    data : dict
+        Pivot JSON dict with ``frames`` populated (and optionally
+        ``angles`` and ``events``).
+    output_path : str
+        Output ``.xlsx`` file path.
+    cycles : dict, optional
+        Output of ``segment_cycles()``.
+
+    Returns
+    -------
+    str
+        Path to the created file.
+    """
+    if not isinstance(data, dict):
+        raise TypeError("data must be a dict")
+    if cycles is None:
+        cycles = data.get("cycles_data")
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "openpyxl is required for Excel export: pip install openpyxl"
+        )
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    frames = data.get("frames", [])
+    meta = data.get("meta", {})
+    fps_val = meta.get("fps", 30.0)
+    width_val = meta.get("width")
+    height_val = meta.get("height")
+
+    # Build angle lookup: frame_idx -> angle frame
+    angle_lookup = {}
+    angles_data = data.get("angles", {})
+    if angles_data and angles_data.get("frames"):
+        for af in angles_data["frames"]:
+            angle_lookup[af.get("frame_idx")] = af
+
+    # Build header: 33 landmarks × 4 + metadata + angles
+    header = []
+    for lm_name in MP_LANDMARK_NAMES:
+        header.extend([
+            f"{lm_name}_x", f"{lm_name}_y",
+            f"{lm_name}_z", f"{lm_name}_visibility",
+        ])
+    header.extend(["fps", "width", "height"])
+    # HIP_FOOT distances (left/right, raw/filtered)
+    header.extend([
+        "LEFT_HIP_FOOT_distance", "LEFT_HIP_FOOT_distance_filtered",
+        "RIGHT_HIP_FOOT_distance", "RIGHT_HIP_FOOT_distance_filtered",
+    ])
+    header.extend([
+        "knee_angle_left", "hip_angle_left",
+        "ankle_angle_left", "ankle_angle_right",
+        "knee_angle_right",
+    ])
+
+    # Build rows
+    rows = []
+    for frame in frames:
+        row = []
+        landmarks = frame.get("landmarks", {})
+
+        # 33 landmark columns
+        for lm_name in MP_LANDMARK_NAMES:
+            lm = landmarks.get(lm_name)
+            if lm is not None:
+                row.extend([
+                    lm.get("x"),
+                    lm.get("y"),
+                    lm.get("z", 0.0),
+                    lm.get("visibility", 0.0),
+                ])
+            else:
+                row.extend([None, None, None, None])
+
+        # Metadata columns (repeated per row, matching AUDR format)
+        row.extend([fps_val, width_val, height_val])
+
+        # HIP_FOOT distances
+        l_hip = landmarks.get("LEFT_HIP")
+        r_hip = landmarks.get("RIGHT_HIP")
+        l_foot = landmarks.get("LEFT_FOOT_INDEX")
+        r_foot = landmarks.get("RIGHT_FOOT_INDEX")
+
+        def _hip_foot_dist(hip, foot):
+            if (hip and foot
+                    and hip.get("x") is not None
+                    and foot.get("x") is not None):
+                dx = hip["x"] - foot["x"]
+                dy = hip.get("y", 0) - foot.get("y", 0)
+                return float(np.sqrt(dx * dx + dy * dy))
+            return None
+
+        row.append(_hip_foot_dist(l_hip, l_foot))
+        row.append(None)  # filtered — not computed here
+        row.append(_hip_foot_dist(r_hip, r_foot))
+        row.append(None)
+
+        # Angles
+        fidx = frame.get("frame_idx")
+        af = angle_lookup.get(fidx, {})
+        row.append(af.get("knee_L"))
+        row.append(af.get("hip_L"))
+        row.append(af.get("ankle_L"))
+        row.append(af.get("ankle_R"))
+        row.append(af.get("knee_R"))
+
+        rows.append(row)
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df = pd.DataFrame(rows, columns=header)
+        df.to_excel(writer, sheet_name="Sheet1", index=False)
+
+        # Gait_Steps sheet
+        if cycles and cycles.get("cycles"):
+            step_rows = []
+            for c in cycles["cycles"]:
+                sf = c["start_frame"]
+                ef = c["end_frame"]
+                dur = c.get("duration", (ef - sf) / fps_val)
+
+                # Compute landmark x-distances across the cycle
+                def _x_dist(lm_name):
+                    s_lm = None
+                    e_lm = None
+                    for f in frames:
+                        fi = f.get("frame_idx")
+                        lm = f.get("landmarks", {}).get(lm_name)
+                        if lm and lm.get("x") is not None:
+                            if fi == sf:
+                                s_lm = lm["x"]
+                            if fi == ef:
+                                e_lm = lm["x"]
+                    if s_lm is not None and e_lm is not None:
+                        return abs(e_lm - s_lm)
+                    return None
+
+                side = c.get("side", "left")
+                prefix = side.upper()
+                step_rows.append({
+                    "Start_Frame": sf,
+                    "End_Frame": ef,
+                    "Duration_sec": round(dur, 4),
+                    "Heel_X_Distance": _x_dist(f"{prefix}_HEEL"),
+                    "Foot_X_Distance": _x_dist(f"{prefix}_FOOT_INDEX"),
+                    "Ankle_X_Distance": _x_dist(f"{prefix}_ANKLE"),
+                })
+            pd.DataFrame(step_rows).to_excel(
+                writer, sheet_name="Gait_Steps", index=False)
+
+    logger.info(f"Exported landmarks Excel (AUDR format): {path}")
     return str(path)
 
 

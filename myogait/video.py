@@ -370,6 +370,10 @@ def render_skeleton_video(
     angles_data = data.get("angles", {})
     angle_frames = angles_data.get("frames", []) if angles_data else []
 
+    # If landmarks were flipped during extraction (flip_if_right), un-flip
+    # x coordinates so the skeleton aligns with the original video.
+    was_flipped = data.get("extraction", {}).get("was_flipped", False)
+
     # Build event lookup: frame_idx -> event info
     event_lookup: Dict[int, dict] = {}
     if show_events:
@@ -400,6 +404,14 @@ def render_skeleton_video(
                 continue
 
             lm = fd.get("landmarks", {})
+
+            # Un-flip x coordinates if extraction used flip_if_right
+            if was_flipped and lm:
+                lm = {
+                    name: {**val, "x": 1.0 - val["x"]}
+                    if val.get("x") is not None else val
+                    for name, val in lm.items()
+                }
 
             # Angles for this frame
             frame_angles = None

@@ -40,7 +40,7 @@ Validation::
     report = validate_biomechanical(data, cycles)
 """
 
-__version__ = "0.5.19"
+__version__ = "0.5.20"
 
 from .extract import extract, detect_sagittal_alignment, auto_crop_roi, select_person
 from .normalize import (
@@ -115,6 +115,7 @@ from .report import generate_report, generate_longitudinal_report
 from .export import (
     export_csv, export_mot, export_trc, export_excel, export_c3d,
     to_dataframe, export_json, export_summary_json, export_openpose_json,
+    export_landmarks_excel,
 )
 from .opensim import (
     export_opensim_scale_setup,
@@ -255,6 +256,7 @@ __all__ = [
     "to_dataframe",
     "export_summary_json",
     "export_openpose_json",
+    "export_landmarks_excel",
     # OpenSim
     "export_opensim_scale_setup",
     "export_ik_setup",
