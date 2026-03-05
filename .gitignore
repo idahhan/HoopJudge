@@ -9,3 +9,8 @@ venv/
 test_output.json
 run_pipeline.py
 .myogait/
+.claude/
+*.MP4
+*.xlsx
+*.pt
+*:Zone.Identifier

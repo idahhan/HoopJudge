@@ -216,6 +216,44 @@ class TestRenderStickfigureAnimation:
                 data, str(tmp_path / "bad.avi"), format="avi",
             )
 
+    def test_show_angles_uses_unflipped_landmarks(self, monkeypatch, tmp_path):
+        """Angle annotations should align with un-flipped skeleton coordinates."""
+        from matplotlib.axes import Axes
+        import matplotlib.animation as mpl_animation
+
+        data = make_walking_data(n_frames=1, fps=10.0)
+        data["extraction"] = {"model": "mediapipe", "was_flipped": True}
+        data["frames"][0]["landmarks"]["LEFT_HIP"]["x"] = 0.2
+        data["angles"] = {"frames": [{"hip_L": 10.0}]}
+
+        seen_xy = []
+        orig_annotate = Axes.annotate
+
+        def _spy_annotate(self, text, xy, *args, **kwargs):
+            seen_xy.append(xy)
+            return orig_annotate(self, text, xy, *args, **kwargs)
+
+        class _DummyAnim:
+            def __init__(self, _fig, draw_fn, frames=None, interval=None, blit=False):
+                self._draw_fn = draw_fn
+
+            def save(self, *_args, **_kwargs):
+                self._draw_fn(0)
+
+        monkeypatch.setattr(Axes, "annotate", _spy_annotate)
+        monkeypatch.setattr(mpl_animation, "FuncAnimation", _DummyAnim)
+
+        render_stickfigure_animation(
+            data,
+            str(tmp_path / "annot.gif"),
+            format="gif",
+            fps=10,
+            show_angles=True,
+        )
+
+        # LEFT_HIP x=0.2 should be un-flipped to x=0.8 for annotation.
+        assert any(abs(float(x) - 0.8) < 1e-6 for x, _y in seen_xy)
+
 
 # ── SKELETON_CONNECTIONS ─────────────────────────────────────────
 

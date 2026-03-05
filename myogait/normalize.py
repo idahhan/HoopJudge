@@ -1958,18 +1958,21 @@ def procrustes_align(
 
 # L/R landmark pairs to check independently.
 _LATERAL_PAIRS = [
-    ("ankle", "LEFT_ANKLE", "RIGHT_ANKLE"),
-    ("knee", "LEFT_KNEE", "RIGHT_KNEE"),
     ("hip", "LEFT_HIP", "RIGHT_HIP"),
+    ("knee", "LEFT_KNEE", "RIGHT_KNEE"),
+    ("ankle", "LEFT_ANKLE", "RIGHT_ANKLE"),
     ("heel", "LEFT_HEEL", "RIGHT_HEEL"),
     ("foot_index", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"),
     ("shoulder", "LEFT_SHOULDER", "RIGHT_SHOULDER"),
 ]
 
-# Anatomical coherence checks: (child_L, child_R, parent_L, parent_R)
-_COHERENCE_CHECKS = [
-    ("LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_HEEL", "RIGHT_HEEL"),
+# Anatomical chain: child must stay on same side as parent.
+# (child_L, child_R, parent_L, parent_R)
+_CHAIN_CHECKS = [
     ("LEFT_KNEE", "RIGHT_KNEE", "LEFT_HIP", "RIGHT_HIP"),
+    ("LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_KNEE", "RIGHT_KNEE"),
+    ("LEFT_HEEL", "RIGHT_HEEL", "LEFT_ANKLE", "RIGHT_ANKLE"),
+    ("LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX", "LEFT_HEEL", "RIGHT_HEEL"),
 ]
 
 
@@ -1992,23 +1995,28 @@ def _sq_dist(a, b):
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
-def correct_lateral_labels(data: dict, window: int = 2) -> dict:
+def correct_lateral_labels(
+    data: dict,
+    ratio: float = 0.25,
+    min_sep: float = 0.03,
+    window: Optional[int] = None,
+) -> dict:
     """Detect and correct per-landmark LEFT/RIGHT label swaps.
 
     MediaPipe swaps individual landmark pairs (e.g. ankles, knees)
     during leg crossings in sagittal view while the rest of the leg
     stays correctly labelled.  This function treats **each L/R pair
-    independently** using a sliding-window displacement cost:
+    independently** using consecutive-frame transition detection.
 
-    For each frame *i* and each pair, the cost of keeping the current
-    labels vs swapping them is compared against the surrounding
-    ``2 * window`` neighbours.  If swapping is cheaper, the pair is
-    corrected for that frame only.
+    For each pair, consecutive frames are compared: when swapping
+    labels produces a much smoother trajectory than keeping them
+    (``cost_swap / cost_keep < ratio``), a transition is recorded
+    and the swap state is toggled.  Frames where L and R are closer
+    than *min_sep* are skipped (too close to distinguish).
 
-    A bootstrap polarity check ensures the initial labels (majority
-    of frames) are treated as the reference.  Post-correction
-    anatomical coherence validates that each landmark is closer to
-    its ipsilateral neighbour (e.g. ankle closer to same-side heel).
+    After per-pair corrections, an anatomical chain consistency pass
+    ensures that connected landmarks (hip → knee → ankle → heel →
+    foot) remain on the same side.
 
     Call **after** extraction and **before** ``normalize()`` or
     ``compute_angles()``.
@@ -2017,8 +2025,16 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
     ----------
     data : dict
         Pivot JSON dict with ``frames`` populated.
-    window : int
-        Half-width of the sliding window (default 2 = +/- 2 frames).
+    ratio : float
+        Transition detection threshold.  A swap transition is
+        flagged when ``cost_swap / cost_keep < ratio``.  Default
+        0.25 (swap must be 4x cheaper).
+    min_sep : float
+        Minimum L/R separation in normalised coords.  Frames where
+        ``dist(L, R) < min_sep`` are skipped.  Default 0.03.
+    window : int, optional
+        Deprecated legacy parameter kept for backward compatibility.
+        The transition-based algorithm ignores this value.
 
     Returns
     -------
@@ -2030,6 +2046,12 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
 
     frames = data.get("frames", [])
     n_frames = len(frames)
+
+    if window is not None:
+        logger.warning(
+            "correct_lateral_labels(window=...) is deprecated and ignored; "
+            "use ratio/min_sep parameters instead."
+        )
 
     if n_frames == 0:
         if data.get("normalization") is None:
@@ -2044,34 +2066,66 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
     # Phase A: walking direction
     walking_direction = detect_walking_direction_from_feet(data)
 
-    # Phase B: per-pair independent swap detection
+    min_sep_sq = min_sep ** 2
+
+    # Phase B: per-pair transition detection
+    # For each consecutive frame pair, compare displacement cost of
+    # keeping vs swapping labels.  A transition is flagged when swap
+    # is much cheaper (ratio < threshold).  The swap mask is built
+    # by toggling state at each transition.
     pair_results = {}
     for pair_name, l_name, r_name in _LATERAL_PAIRS:
-        swap_mask = [False] * n_frames
-
+        # Detect transitions between consecutive frames.
+        # Store (frame_idx, ratio_value) so we can rank by confidence.
+        transition_list = []
+        prev_l = prev_r = None
         for i in range(n_frames):
-            l_i = _get_lm_xy(frames[i], l_name)
-            r_i = _get_lm_xy(frames[i], r_name)
-            if l_i is None or r_i is None:
+            curr_l = _get_lm_xy(frames[i], l_name)
+            curr_r = _get_lm_xy(frames[i], r_name)
+            if curr_l is None or curr_r is None:
+                continue
+            if prev_l is None:
+                prev_l, prev_r = curr_l, curr_r
                 continue
 
-            cost_keep = 0.0
-            cost_swap = 0.0
-            n_valid = 0
+            # Skip when L and R too close to distinguish
+            if _sq_dist(curr_l, curr_r) < min_sep_sq:
+                prev_l, prev_r = curr_l, curr_r
+                continue
 
-            for j in range(max(0, i - window), min(n_frames, i + window + 1)):
-                if j == i:
-                    continue
-                l_j = _get_lm_xy(frames[j], l_name)
-                r_j = _get_lm_xy(frames[j], r_name)
-                if l_j is None or r_j is None:
-                    continue
-                n_valid += 1
-                cost_keep += _sq_dist(l_i, l_j) + _sq_dist(r_i, r_j)
-                cost_swap += _sq_dist(l_i, r_j) + _sq_dist(r_i, l_j)
+            cost_keep = (_sq_dist(prev_l, curr_l)
+                         + _sq_dist(prev_r, curr_r))
+            cost_swap = (_sq_dist(prev_l, curr_r)
+                         + _sq_dist(prev_r, curr_l))
 
-            if n_valid > 0 and cost_swap < cost_keep:
-                swap_mask[i] = True
+            if cost_keep > 0 and cost_swap / cost_keep < ratio:
+                transition_list.append(
+                    (i, cost_swap / cost_keep))
+
+            prev_l, prev_r = curr_l, curr_r
+
+        # MediaPipe swaps always produce paired transitions
+        # (entry + exit).  If we have an odd number, the weakest
+        # detection is likely a false positive — remove it.
+        if len(transition_list) % 2 != 0:
+            # Remove the transition with the highest ratio
+            # (least confident)
+            weakest = max(transition_list, key=lambda t: t[1])
+            transition_list.remove(weakest)
+            logger.debug(
+                "Lateral [%s]: dropped unpaired transition at "
+                "frame %d (ratio=%.3f)",
+                pair_name, weakest[0], weakest[1])
+
+        transitions = {t[0] for t in transition_list}
+
+        # Build mask by toggling at each transition
+        swap_mask = [False] * n_frames
+        in_swap = False
+        for i in range(n_frames):
+            if i in transitions:
+                in_swap = not in_swap
+            swap_mask[i] = in_swap
 
         # Bootstrap polarity: if majority are flagged, the initial
         # labels were wrong for this pair — invert the mask.
@@ -2104,9 +2158,11 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
                 pair_results[pair_name]["pct"],
             )
 
-    # Phase C: anatomical coherence post-correction
+    # Phase C: anatomical chain consistency
+    # Ensure child landmarks stay on the same side as their parent.
+    # Walk the chain top-down: hip → knee → ankle → heel → foot.
     n_reverted = 0
-    for child_l, child_r, parent_l, parent_r in _COHERENCE_CHECKS:
+    for child_l, child_r, parent_l, parent_r in _CHAIN_CHECKS:
         for i in range(n_frames):
             cl = _get_lm_xy(frames[i], child_l)
             cr = _get_lm_xy(frames[i], child_r)
@@ -2119,7 +2175,7 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
             # Cross-side: child_L↔parent_R + child_R↔parent_L
             d_cross = _sq_dist(cl, pr) + _sq_dist(cr, pl)
             if d_cross < d_same:
-                # Child is closer to opposite parent — revert child pair
+                # Child is closer to opposite parent — swap child
                 lm = frames[i].get("landmarks", {})
                 if child_l in lm and child_r in lm:
                     lm[child_l], lm[child_r] = lm[child_r], lm[child_l]
@@ -2127,8 +2183,8 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
 
     if n_reverted:
         logger.info(
-            "Lateral correction: reverted %d frames via anatomical "
-            "coherence check", n_reverted)
+            "Lateral correction: fixed %d chain inconsistencies",
+            n_reverted)
 
     # Phase D: metadata
     n_total = sum(
@@ -2138,6 +2194,7 @@ def correct_lateral_labels(data: dict, window: int = 2) -> dict:
         "walking_direction": walking_direction,
         "pairs": pair_results,
         "n_total_frame_corrections": n_total,
+        "chain_fixes": n_reverted,
     }
 
     if data.get("normalization") is None:

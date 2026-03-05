@@ -717,9 +717,10 @@ def compute_angles(
         logger.info("Skipped %d/%d low-confidence frames (< %.2f)",
                      n_skipped, len(data["frames"]), min_confidence)
 
-    # If the subject walks right-to-left the sagittal_vertical_axis
-    # hip sign is mirrored.  Invert so that flexion stays positive.
-    if walking_direction == "right_to_left":
+    # In sagittal_vertical_axis, right-to-left walking mirrors hip sign.
+    # Keep flexion positive by inverting only for this method.
+    if (walking_direction == "right_to_left"
+            and method == "sagittal_vertical_axis"):
         for af in angle_frames:
             for side in ("L", "R"):
                 key = f"hip_{side}"

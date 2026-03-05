@@ -7,6 +7,7 @@ and the compute_extended_angles() public API.
 """
 
 
+import copy
 import numpy as np
 import pytest
 
@@ -439,6 +440,52 @@ class TestDetectWalkingDirection:
         assert "walking_direction" in data["angles"]
         assert data["angles"]["walking_direction"] in (
             "left_to_right", "right_to_left"
+        )
+
+    def test_right_to_left_hip_flip_only_for_vertical_axis(self, monkeypatch):
+        """Right-to-left correction must not invert sagittal_classic hip sign."""
+        base = make_walking_data(n_frames=60)
+
+        monkeypatch.setattr("myogait.angles._detect_walking_direction",
+                            lambda _data: "left_to_right")
+        classic_l2r = compute_angles(
+            copy.deepcopy(base),
+            method="sagittal_classic",
+            calibrate=False,
+            correction_factor=1.0,
+            correct_ankle_sliding=False,
+        )
+        vertical_l2r = compute_angles(
+            copy.deepcopy(base),
+            method="sagittal_vertical_axis",
+            calibrate=False,
+            correction_factor=1.0,
+            correct_ankle_sliding=False,
+        )
+
+        monkeypatch.setattr("myogait.angles._detect_walking_direction",
+                            lambda _data: "right_to_left")
+        classic_r2l = compute_angles(
+            copy.deepcopy(base),
+            method="sagittal_classic",
+            calibrate=False,
+            correction_factor=1.0,
+            correct_ankle_sliding=False,
+        )
+        vertical_r2l = compute_angles(
+            copy.deepcopy(base),
+            method="sagittal_vertical_axis",
+            calibrate=False,
+            correction_factor=1.0,
+            correct_ankle_sliding=False,
+        )
+
+        i = 20
+        assert classic_r2l["angles"]["frames"][i]["hip_L"] == pytest.approx(
+            classic_l2r["angles"]["frames"][i]["hip_L"], abs=1e-9
+        )
+        assert vertical_r2l["angles"]["frames"][i]["hip_L"] == pytest.approx(
+            -vertical_l2r["angles"]["frames"][i]["hip_L"], abs=1e-9
         )
 
 

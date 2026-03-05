@@ -219,6 +219,12 @@ class TestEdgeCases:
         assert result["normalization"] is not None
         assert "lateral_correction" in result["normalization"]
 
+    def test_legacy_window_argument_is_accepted(self):
+        """Legacy API window=... should not break callers."""
+        data = _make_data(n_frames=10)
+        result = correct_lateral_labels(data, window=2)
+        assert "lateral_correction" in result["normalization"]
+
 
 # ── Tests: idempotence ───────────────────────────────────────────────
 

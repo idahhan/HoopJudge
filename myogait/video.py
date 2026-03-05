@@ -626,7 +626,8 @@ def render_stickfigure_animation(
                 if goliath_data is not None:
                     _annotate_goliath_angles(ax, goliath_data, af)
                 else:
-                    lm = fd.get("landmarks", {})
+                    # Reuse the same landmark coordinates as the skeleton,
+                    # including optional un-flip, so angle labels stay aligned.
                     _angle_map = {
                         "hip_L": "LEFT_HIP", "hip_R": "RIGHT_HIP",
                         "knee_L": "LEFT_KNEE", "knee_R": "RIGHT_KNEE",
