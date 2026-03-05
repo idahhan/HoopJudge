@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # gaitkit wrapper functions (which have a fixed signature taking only
 # ``frames``) to access the full data dict including angle data.
 _current_data: Optional[dict] = None
+_current_femur_length_mm: float = 400.0
 
 
 def _remap_event_frames(events: dict, frames: list, fps: float) -> None:
@@ -444,6 +445,7 @@ def event_consensus(
     tolerance: int = 3,
     min_cycle_duration: float = 0.4,
     cutoff_freq: float = 6.0,
+    femur_length_mm: float = 400.0,
 ) -> dict:
     """Multi-method consensus event detection.
 
@@ -464,6 +466,8 @@ def event_consensus(
         Minimum gait cycle duration in seconds (default 0.4).
     cutoff_freq : float, optional
         Low-pass filter cutoff frequency in Hz (default 6.0).
+    femur_length_mm : float, optional
+        Reference femur length in mm for gaitkit methods (default 400).
 
     Returns
     -------
@@ -484,8 +488,9 @@ def event_consensus(
     frames = data["frames"]
 
     # Collect events from each method
-    global _current_data
+    global _current_data, _current_femur_length_mm
     _current_data = data
+    _current_femur_length_mm = femur_length_mm
     all_results = []
     try:
         for method_name in methods:
@@ -736,7 +741,7 @@ def _import_gaitkit():
         )
 
 
-def _convert_to_gaitkit_frames(data: dict) -> list:
+def _convert_to_gaitkit_frames(data: dict, femur_length_mm: float = 400.0) -> list:
     """Convert myogait data dict to gaitkit angle frame format.
 
     Maps myogait angle field names to gaitkit field names:
@@ -745,14 +750,20 @@ def _convert_to_gaitkit_frames(data: dict) -> list:
         - knee_L -> left_knee_angle, knee_R -> right_knee_angle
         - ankle_L -> left_ankle_angle, ankle_R -> right_ankle_angle
 
-    Landmark positions are converted from myogait format
-    ``{name: {x, y, visibility}}`` to gaitkit format
-    ``{name: (x, y, z)}`` where z defaults to 0.0.
+    Landmark positions are converted from myogait normalised [0, 1]
+    coordinates to millimetres using *femur_length_mm* as reference.
+    The median hip→knee distance (in normalised coords) is mapped to
+    *femur_length_mm* and the same scale factor is applied to every
+    landmark.  This ensures that gaitkit velocity features (mm/s) are
+    in realistic units rather than normalised coordinates.
 
     Parameters
     ----------
     data : dict
         Pivot JSON dict with ``angles`` (preferred) or ``frames`` populated.
+    femur_length_mm : float, optional
+        Reference femur length in millimetres (default 400).  Used to
+        scale normalised landmark positions to real-world units.
 
     Returns
     -------
@@ -853,6 +864,39 @@ def _convert_to_gaitkit_frames(data: dict) -> list:
 
         gaitkit_frames.append(gk_frame)
 
+    # ── Scale normalised positions to millimetres ────────────────────
+    # Compute median femur length (hip→knee) in normalised coords,
+    # then scale all landmark positions so that distance equals
+    # femur_length_mm.
+    femur_dists = []
+    for gk_frame in gaitkit_frames:
+        lp = gk_frame.get("landmark_positions", {})
+        for hip_k, knee_k in [("left_hip", "left_knee"),
+                               ("right_hip", "right_knee")]:
+            hip = lp.get(hip_k)
+            knee = lp.get(knee_k)
+            if hip is not None and knee is not None:
+                dx = hip[0] - knee[0]
+                dz = hip[2] - knee[2]
+                d = np.sqrt(dx * dx + dz * dz)
+                if d > 1e-6:
+                    femur_dists.append(d)
+
+    if femur_dists:
+        femur_norm = float(np.median(femur_dists))
+        if femur_norm > 1e-6:
+            scale = femur_length_mm / femur_norm
+            for gk_frame in gaitkit_frames:
+                lp = gk_frame.get("landmark_positions", {})
+                scaled_lp = {}
+                for name, coords in lp.items():
+                    scaled_lp[name] = (
+                        coords[0] * scale,
+                        coords[1] * scale,
+                        coords[2] * scale,
+                    )
+                gk_frame["landmark_positions"] = scaled_lp
+
     return gaitkit_frames
 
 
@@ -916,6 +960,7 @@ def _detect_gaitkit(
     data: dict,
     fps: float,
     method: str = "bike",
+    femur_length_mm: float = 400.0,
     **kwargs,
 ) -> Dict[str, list]:
     """Detect gait events using a gaitkit method.
@@ -928,6 +973,8 @@ def _detect_gaitkit(
         Frame rate.
     method : str
         gaitkit method name (without "gk_" prefix).
+    femur_length_mm : float, optional
+        Reference femur length in mm for position scaling (default 400).
     **kwargs
         Extra keyword arguments passed to gaitkit.detect().
 
@@ -937,7 +984,7 @@ def _detect_gaitkit(
         Events in myogait format: {left_hs, right_hs, left_to, right_to}.
     """
     gaitkit = _import_gaitkit()
-    gk_frames = _convert_to_gaitkit_frames(data)
+    gk_frames = _convert_to_gaitkit_frames(data, femur_length_mm=femur_length_mm)
     gk_result = gaitkit.detect(gk_frames, method=method, fps=fps, **kwargs)
     return _gaitkit_result_to_myogait(gk_result, fps)
 
@@ -949,6 +996,7 @@ def _detect_gaitkit_ensemble(
     min_votes: int = 2,
     tolerance_ms: float = 50.0,
     weights: str = "benchmark",
+    femur_length_mm: float = 400.0,
     **kwargs,
 ) -> Dict[str, list]:
     """Detect gait events using gaitkit multi-method ensemble voting.
@@ -967,6 +1015,8 @@ def _detect_gaitkit_ensemble(
         Temporal tolerance in ms for clustering (default 50.0).
     weights : str, optional
         Weight scheme for voting (default "benchmark").
+    femur_length_mm : float, optional
+        Reference femur length in mm for position scaling (default 400).
     **kwargs
         Extra keyword arguments passed to gaitkit.detect_ensemble().
 
@@ -976,7 +1026,7 @@ def _detect_gaitkit_ensemble(
         Events in myogait format: {left_hs, right_hs, left_to, right_to}.
     """
     gaitkit = _import_gaitkit()
-    gk_frames = _convert_to_gaitkit_frames(data)
+    gk_frames = _convert_to_gaitkit_frames(data, femur_length_mm=femur_length_mm)
 
     if methods is None:
         methods = ["bike", "zeni", "oconnor"]
@@ -1082,7 +1132,8 @@ def _make_gaitkit_wrapper(gk_method_name: str) -> Callable:
         data_proxy = {"frames": frames, "meta": {"fps": fps}}
         if _current_data is not None and _current_data.get("angles"):
             data_proxy["angles"] = _current_data["angles"]
-        return _detect_gaitkit(data_proxy, fps, method=gk_method_name)
+        return _detect_gaitkit(data_proxy, fps, method=gk_method_name,
+                               femur_length_mm=_current_femur_length_mm)
     wrapper.__doc__ = f"gaitkit '{gk_method_name}' event detection method."
     wrapper.__name__ = f"_detect_gk_{gk_method_name}"
     return wrapper
@@ -1094,7 +1145,8 @@ def _make_gaitkit_ensemble_wrapper() -> Callable:
         data_proxy = {"frames": frames, "meta": {"fps": fps}}
         if _current_data is not None and _current_data.get("angles"):
             data_proxy["angles"] = _current_data["angles"]
-        return _detect_gaitkit_ensemble(data_proxy, fps)
+        return _detect_gaitkit_ensemble(
+            data_proxy, fps, femur_length_mm=_current_femur_length_mm)
     wrapper.__doc__ = "gaitkit ensemble (multi-method voting) event detection."
     wrapper.__name__ = "_detect_gk_ensemble"
     return wrapper
@@ -1207,6 +1259,7 @@ def detect_events(
     min_cycle_duration: float = 0.4,
     cutoff_freq: float = 6.0,
     adaptive: bool = False,
+    femur_length_mm: float = 400.0,
 ) -> dict:
     """Detect gait events (heel strike and toe off) from pose data.
 
@@ -1229,6 +1282,11 @@ def detect_events(
         - Slow (< 0.5 m/s equivalent): min_cycle=0.6, cutoff=4.0
         - Normal (0.5-1.5 m/s equivalent): min_cycle=0.4, cutoff=6.0
         - Fast (> 1.5 m/s equivalent): min_cycle=0.3, cutoff=8.0
+    femur_length_mm : float, optional
+        Reference femur length in millimetres (default 400). Used by
+        gaitkit methods (``gk_*``) to convert normalised landmark
+        positions to real-world units before computing velocity
+        features.
 
     Returns
     -------
@@ -1274,8 +1332,9 @@ def detect_events(
         raise ValueError(f"Unknown method: {method}. Available: {available}")
 
     detect_func = EVENT_METHODS[method]
-    global _current_data
+    global _current_data, _current_femur_length_mm
     _current_data = data
+    _current_femur_length_mm = femur_length_mm
     try:
         events = detect_func(frames, fps, min_cycle_duration, cutoff_freq)
     finally:

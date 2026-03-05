@@ -1206,12 +1206,46 @@ def _correct_label_inversions(landmarks_list: list) -> tuple:
         # Apply per-pair swap (only for frames not already corrected
         # by Pass 1, to avoid double-swap)
         n_applied = 0
+        pass2_swapped = set()
         for i, should_swap in enumerate(pair_mask):
             if should_swap and result[i] is not None and not inversion_mask[i]:
                 result[i][li], result[i][ri] = (
                     result[i][ri].copy(), result[i][li].copy())
                 inversion_mask[i] = True
                 n_applied += 1
+                pass2_swapped.add(i)
+
+        # Post-swap ankle-heel consistency check: revert frames where
+        # LEFT_ANKLE ends up closer to RIGHT_HEEL than LEFT_HEEL (and
+        # vice versa), which indicates a false-positive swap — common
+        # at high frame rates (≥60 fps) when legs are close together.
+        LH = MP_NAME_TO_INDEX.get("LEFT_HEEL", 29)
+        RH = MP_NAME_TO_INDEX.get("RIGHT_HEEL", 30)
+        n_reverted = 0
+        for i in list(pass2_swapped):
+            lm = result[i]
+            if (LH < lm.shape[0] and RH < lm.shape[0]
+                    and not np.any(np.isnan(
+                        lm[[li, ri, LH, RH], :2]))):
+                # Same-side distance: L_ankle↔L_heel + R_ankle↔R_heel
+                d_same = (np.sum((lm[li, :2] - lm[LH, :2]) ** 2)
+                          + np.sum((lm[ri, :2] - lm[RH, :2]) ** 2))
+                # Cross-side distance: L_ankle↔R_heel + R_ankle↔L_heel
+                d_cross = (np.sum((lm[li, :2] - lm[RH, :2]) ** 2)
+                           + np.sum((lm[ri, :2] - lm[LH, :2]) ** 2))
+                if d_cross < d_same:
+                    # Ankles are closer to opposite heels — revert
+                    result[i][li], result[i][ri] = (
+                        result[i][ri].copy(), result[i][li].copy())
+                    inversion_mask[i] = False
+                    n_applied -= 1
+                    n_reverted += 1
+                    pass2_swapped.discard(i)
+
+        if n_reverted:
+            logger.info(
+                "Pass 2: reverted %d false positives via ankle-heel "
+                "consistency check", n_reverted)
 
         if n_applied:
             reduction = (1 - total_vel_after / total_vel_before) * 100
