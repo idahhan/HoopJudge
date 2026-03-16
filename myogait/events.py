@@ -73,7 +73,7 @@ def _remap_event_frames(events: dict, frames: list, fps: float) -> None:
             if 0 <= arr_idx < n:
                 real_idx = idx_map[arr_idx]
                 ev["frame"] = real_idx
-                ev["time"] = round(real_idx / fps, 4)
+                ev["time"] = round(ev["time"] + (real_idx - arr_idx) / fps, 4)
 
 
 def _extract_landmark_series(frames: list, name: str, coord: str = "x") -> np.ndarray:
