@@ -135,6 +135,21 @@ from .video import (
     render_skeleton_frame,
     render_stickfigure_animation,
 )
+from .ball import (
+    analyze_ball,
+    detect_ball_frames,
+    track_ball_frames,
+    classify_ball_state,
+    smooth_ball_states,
+    render_ball_video,
+    ball_to_csv,
+)
+from .detectors.ball_detector import (
+    BallDetection,
+    BallDetector,
+    YOLOBallDetector,
+    create_ball_detector,
+)
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .axis_utils import (
     detect_walking_direction_from_feet,
@@ -159,6 +174,15 @@ from .experimental_benchmark import (
     build_single_pair_benchmark_config,
     run_single_pair_benchmark,
 )
+
+# Register the learned TCN detector so that
+# detect_events(data, method="learned_tcn") works after importing myogait.
+# Wrapped in try/except: importing the module registers the method as a side
+# effect, but we don't want a missing torch installation to break the import.
+try:
+    from .detectors import learned_contact_detector as _learned_tcn  # noqa: F401
+except Exception:
+    pass
 
 __all__ = [
     # Core pipeline

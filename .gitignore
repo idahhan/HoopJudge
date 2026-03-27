@@ -4,13 +4,27 @@ __pycache__/
 dist/
 build/
 venv/
+.venv/
 .pytest_cache/
 *.task
 test_output.json
 run_pipeline.py
 .myogait/
 .claude/
+.DS_Store
 *.MP4
 *.xlsx
 *.pt
 *:Zone.Identifier
+
+# Sample / test data (large files, not committed)
+trimmed-*.mov
+trimmed-*.mp4
+trimmed-*.json
+trimmed-*_ball.csv
+palette.png
+
+# Keep demo media tracked
+!media/
+!media/*.mp4
+!media/*.gif

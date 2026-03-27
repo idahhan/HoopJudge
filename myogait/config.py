@@ -56,9 +56,20 @@ DEFAULT_CONFIG = {
         "calibration_frames": 30,
     },
     "events": {
+        # Built-in rule-based methods: zeni, oconnor, velocity, crossing, consensus
+        # Learned method (requires pretrained weights): learned_tcn
+        # gaitkit methods (optional dep): gk_zeni, gk_oconnor, gk_ensemble, …
         "method": "zeni",
         "min_cycle_duration": 0.4,
         "cutoff_freq": 6.0,
+        # learned_tcn options (ignored by rule-based methods):
+        "learned_tcn": {
+            "window_size": 24,
+            "threshold_on": 0.6,
+            "threshold_off": 0.4,
+            "min_event_gap": 5,
+            "smoothing_frames": 5,
+        },
     },
     "cycles": {
         "n_points": 101,

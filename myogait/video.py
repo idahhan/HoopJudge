@@ -94,6 +94,52 @@ def _goliath_conn_color(idx_a: int, idx_b: int) -> Tuple[int, int, int]:
     return _COLOR_CENTER
 
 
+def _draw_contact_indicator(
+    frame: np.ndarray,
+    pts: dict,
+    contact_probs: dict,
+) -> None:
+    """Draw a colour-coded contact probability badge near each ankle (in-place).
+
+    The circle colour interpolates from green (prob=1, planted) to
+    red (prob=0, airborne).  A short label "L:0.92" / "R:0.14" is
+    printed next to each badge.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        BGR image to draw on (modified in-place).
+    pts : dict
+        Pixel-coordinate dict produced during landmark rendering.
+    contact_probs : dict
+        ``{"left": float, "right": float}`` ∈ [0, 1].
+    """
+    mapping = {
+        "left":  "LEFT_ANKLE",
+        "right": "RIGHT_ANKLE",
+    }
+    for side, lm_name in mapping.items():
+        prob = contact_probs.get(side)
+        if prob is None or lm_name not in pts:
+            continue
+        prob = float(np.clip(prob, 0.0, 1.0))
+        # Green (0,200,0) → Red (0,0,255) via BGR interpolation
+        g = int(200 * prob)
+        r = int(255 * (1.0 - prob))
+        color = (0, g, r)
+        cx, cy = pts[lm_name]
+        # Small filled circle offset below the ankle
+        cx_badge = cx + 14
+        cy_badge = cy + 14
+        cv2.circle(frame, (cx_badge, cy_badge), 6, color, -1, cv2.LINE_AA)
+        cv2.circle(frame, (cx_badge, cy_badge), 6, _COLOR_WHITE, 1, cv2.LINE_AA)
+        label = f"{'L' if side == 'left' else 'R'}:{prob:.2f}"
+        cv2.putText(
+            frame, label, (cx_badge + 9, cy_badge + 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, _COLOR_WHITE, 1, cv2.LINE_AA,
+        )
+
+
 def render_skeleton_frame(
     frame_image: np.ndarray,
     landmarks: dict,
@@ -101,6 +147,7 @@ def render_skeleton_frame(
     events: Optional[dict] = None,
     skeleton_color: str = "auto",
     goliath308: Optional[list] = None,
+    contact_probs: Optional[dict] = None,
 ) -> np.ndarray:
     """Draw landmarks and skeleton connections on an image.
 
@@ -203,6 +250,10 @@ def render_skeleton_frame(
             cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA,
         )
 
+    # Contact probability badges (learned_tcn overlay)
+    if contact_probs:
+        _draw_contact_indicator(frame, pts, contact_probs)
+
     return frame
 
 
@@ -291,6 +342,7 @@ def render_skeleton_video(
     codec: str = "mp4v",
     use_goliath: bool = False,
     min_confidence: float = 0.0,
+    show_contact_probs: bool = False,
 ) -> str:
     """Overlay skeleton on every frame of a source video.
 
@@ -321,6 +373,12 @@ def render_skeleton_video(
     min_confidence : float
         Skip overlay on frames whose ``confidence`` is below this
         threshold (the raw video frame is still written).
+    show_contact_probs : bool
+        When ``True``, draw per-foot contact probability badges near
+        each ankle.  Reads ``data["contact_probs"]`` which is populated
+        by the learned TCN detector after calling
+        ``detect_events(data, method="learned_tcn")``.  The badge
+        colour interpolates green (planted) → red (airborne).
 
     Returns
     -------
@@ -388,6 +446,14 @@ def render_skeleton_video(
                     if fidx is not None:
                         event_lookup[fidx] = {"type": ev_type, "side": side}
 
+    # Build contact probability lookup (arrays indexed by frame position)
+    _cp_left: list = []
+    _cp_right: list = []
+    if show_contact_probs:
+        cp_data = data.get("contact_probs", {})
+        _cp_left  = list(cp_data.get("left",  []))
+        _cp_right = list(cp_data.get("right", []))
+
     frame_idx = 0
     while True:
         ret, frame = cap.read()
@@ -432,12 +498,21 @@ def render_skeleton_video(
             # Goliath 308 rendering
             goliath_data = fd.get("goliath308") if use_goliath else None
 
+            # Contact probability badge (learned_tcn)
+            frame_contact_probs = None
+            if show_contact_probs and frame_idx < len(_cp_left) and frame_idx < len(_cp_right):
+                frame_contact_probs = {
+                    "left":  float(_cp_left[frame_idx]),
+                    "right": float(_cp_right[frame_idx]),
+                }
+
             frame = render_skeleton_frame(
                 frame, lm,
                 angles=frame_angles,
                 events=frame_events,
                 skeleton_color=skeleton_color,
                 goliath308=goliath_data,
+                contact_probs=frame_contact_probs,
             )
 
         writer.write(frame)

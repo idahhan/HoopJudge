@@ -1,3 +1,82 @@
+# HoopJudge
+
+Basketball possession and movement analysis — built on top of [myogait](https://github.com/IDMDataHub/myogait).
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10|3.11|3.12](https://img.shields.io/pypi/pyversions/myogait)](https://pypi.org/project/myogait/)
+
+---
+
+## Ball Possession Analysis
+
+HoopJudge adds a full basketball possession pipeline on top of the myogait pose extraction framework:
+
+- **YOLO11 ball detection** — detects the ball in every frame using ultralytics YOLO11 (COCO class 32, or a custom basketball checkpoint)
+- **Temporal tracking** — fills short detection gaps (≤8 frames by default) using linear interpolation with speed sanity checks; per-frame `source` tag (`detected` | `interpolated` | `predicted` | `none`)
+- **Ball-in-hand classification** — 5 possession states: `left_hand_control`, `right_hand_control`, `both_uncertain`, `free`, `no_ball_detected`; distances normalized by body scale (shoulder-to-hip length) for camera-distance invariance
+- **Temporal smoothing** — sliding-window mode filter (7 frames) to suppress single-frame state flips
+- **FastAPI service** — REST endpoints for analysis, status, debug video generation, and CSV export
+- **Debug video overlay** — color-coded ball circle per source (orange = detected, yellow = interpolated, blue = predicted) with state label and hand centroids
+
+### Demo
+
+[![Ball possession debug overlay](media/output.gif)](media/trimmed-_ball_debug.mp4)
+
+> Click the GIF to download the full debug video. Orange circle = YOLO detection, yellow = interpolated gap fill.
+
+### Quick Start
+
+```bash
+pip install ultralytics opencv-python numpy
+```
+
+```python
+import json
+from myogait.ball import analyze_ball
+
+with open("clip.json") as f:
+    data = json.load(f)
+
+result = analyze_ball("clip.mp4", data, config={"max_interp_gap": 8})
+s = result["ball"]["summary"]
+print(f"YOLO detection rate: {s['yolo_detection_rate']:.1%}")
+print(f"Tracked coverage:    {s['tracked_coverage_rate']:.1%}")
+print(f"State counts: {s['state_counts']}")
+```
+
+### FastAPI Service
+
+```bash
+cd app
+uvicorn main:app --reload
+```
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/ball/analyze/{clip_id}` | Run ball analysis on a clip |
+| GET | `/ball/results/{clip_id}` | Fetch analysis results |
+| GET | `/ball/status/{clip_id}` | Check if results exist |
+| POST | `/ball/debug-video/{clip_id}` | Generate debug overlay video |
+
+### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `yolo_model_path` | `yolo11n.pt` | YOLO model weights (auto-downloads if needed) |
+| `yolo_conf_threshold` | `0.20` | Minimum detection confidence |
+| `max_interp_gap` | `8` | Max frames to interpolate across |
+| `max_ball_speed_px` | `150` | Speed limit for gap rejection (px/frame) |
+| `control_threshold` | `0.40` | Normalized distance threshold for hand control |
+| `smoothing_window` | `7` | Temporal smoothing window (frames) |
+
+---
+
+## Acknowledgements
+
+HoopJudge is a fork of [**myogait**](https://github.com/IDMDataHub/myogait) by Frederic Fer (Institut de Myologie). The original library provides the markerless pose extraction, normalization, and gait analysis framework that HoopJudge builds on. Many thanks for making it open source.
+
+---
+
 # myogait
 
 Markerless video-based gait analysis toolkit.
