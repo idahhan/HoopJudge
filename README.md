@@ -22,6 +22,8 @@ HoopJudge adds a full basketball possession pipeline on top of the myogait pose 
 
 [![Ball possession debug overlay](media/output.gif)](media/trimmed-_ball_debug.mp4)
 
+![yywHHDu8as4_possession_debug](https://github.com/user-attachments/assets/b5738492-b67a-4f6f-9580-ec9165ccee80)
+
 > Click the GIF to download the full debug video. Orange circle = YOLO detection, yellow = interpolated gap fill.
 
 ### Quick Start
