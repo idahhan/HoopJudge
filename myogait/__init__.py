@@ -147,8 +147,30 @@ from .ball import (
 from .detectors.ball_detector import (
     BallDetection,
     BallDetector,
-    YOLOBallDetector,
+    RoboflowBallDetector,
     create_ball_detector,
+)
+from .detectors.person_detector import (
+    PersonDetection,
+    PersonDetector,
+    YOLOPersonDetector,
+    create_person_detector,
+)
+from .player_selection import (
+    select_target_player,
+    render_player_selection_video,
+    score_player_for_ball,
+    assign_target_player,
+    smooth_assignments,
+    FrameAssignment,
+    coco17_to_landmarks,
+    extract_selected_player_pose,
+    run_selected_player_analysis,
+)
+from .possession import (
+    track_possession,
+    render_possession_video,
+    PossessionTracker,
 )
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .axis_utils import (
@@ -318,6 +340,24 @@ __all__ = [
     # Axis utilities
     "detect_walking_direction_from_feet",
     "detect_walking_direction_from_feet_arrays",
+    # Person detection + player selection
+    "PersonDetection",
+    "PersonDetector",
+    "YOLOPersonDetector",
+    "create_person_detector",
+    "select_target_player",
+    "render_player_selection_video",
+    "score_player_for_ball",
+    "assign_target_player",
+    "smooth_assignments",
+    "FrameAssignment",
+    "coco17_to_landmarks",
+    "extract_selected_player_pose",
+    "run_selected_player_analysis",
+    # Possession tracking
+    "track_possession",
+    "render_possession_video",
+    "PossessionTracker",
     # Meta
     "__version__",
 ]

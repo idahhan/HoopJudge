@@ -56,8 +56,14 @@ BALL_STATES = (
 )
 
 _DEFAULT_CONFIG: Dict[str, Any] = {
-    "detector": "yolo",
-    "detector_kwargs": {},
+    "detector": "roboflow",
+    "detector_kwargs": {
+        # xil7x (basketball-xil7x/1) is the default.
+        # api_key can be set here or via ROBOFLOW_API_KEY env var.
+        "project_id": "basketball-xil7x",
+        "version": 1,
+        "target_classes": ["ball"],
+    },
     # Fraction of body_scale below which ball is considered "in hand"
     "control_threshold": 0.40,
     # Minimum landmark visibility to trust a hand position.

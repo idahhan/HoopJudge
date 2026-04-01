@@ -1,32 +1,29 @@
 """Ball detection utilities.
 
-Provides a YOLO11-based detector for locating a basketball in a video frame.
+Single detector: RoboflowBallDetector backed by the basketball-xil7x model
+(cricket-qnb5l workspace, v1 — 97.85 % mAP on basketball/rim/human classes,
+filtered to class "ball").
 
-Detector
---------
-YOLOBallDetector
-    ultralytics YOLO11 (or YOLOv8/v9) detector.
+On first run the ONNX weights are downloaded from Roboflow and cached under
+~/.inference/.  All subsequent frames run **local inference** — no network
+traffic after the initial download.
 
-    When using a COCO-trained model, it targets class 32 (``sports ball``).
-    When using a custom basketball checkpoint, set ``target_class=0`` (first
-    class) or ``target_class=None`` to accept the highest-confidence detection
-    regardless of class.
-
-    Requires ``pip install ultralytics``.
+Requires:
+    pip install inference
 
 Factory
 -------
-create_ball_detector(method="yolo", **kwargs)
-    Only ``"yolo"`` is supported.  Pass keyword arguments to
-    ``YOLOBallDetector.__init__``.
+create_ball_detector(**kwargs)
+    Returns a :class:`RoboflowBallDetector` configured for xil7x.
+    All kwargs are forwarded to ``__init__``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -34,11 +31,18 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Data structures
+# Defaults
 # ---------------------------------------------------------------------------
 
-# COCO class index for "sports ball"
-_SPORTS_BALL_CLASS = 32
+_ROBOFLOW_DEFAULT_PROJECT   = "basketball-xil7x"
+_ROBOFLOW_DEFAULT_WORKSPACE = "cricket-qnb5l"
+_ROBOFLOW_DEFAULT_VERSION   = 1
+_ROBOFLOW_DEFAULT_CLASSES   = ["ball"]   # xil7x has 3 classes: ball / rim / human
+
+
+# ---------------------------------------------------------------------------
+# Data structure
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -53,8 +57,8 @@ class BallDetection:
     bbox : (x1, y1, x2, y2) pixels, or None
     center : (cx, cy) pixels, or None
     radius : estimated radius pixels (half the larger bbox dimension), or None
-    confidence : YOLO confidence score ∈ [0, 1]
-    class_label : YOLO class name (e.g. ``"sports ball"``), or None
+    confidence : model confidence score ∈ [0, 1]
+    class_label : model class name (e.g. ``"ball"``), or None
     """
 
     detected: bool = False
@@ -66,10 +70,10 @@ class BallDetection:
 
     def to_dict(self, include_debug: bool = False) -> dict:
         d: Dict[str, Any] = {
-            "detected": self.detected,
-            "bbox": list(self.bbox) if self.bbox else None,
-            "center": list(self.center) if self.center else None,
-            "radius": self.radius,
+            "detected":   self.detected,
+            "bbox":       list(self.bbox)   if self.bbox   else None,
+            "center":     list(self.center) if self.center else None,
+            "radius":     self.radius,
             "confidence": round(self.confidence, 4),
         }
         if include_debug:
@@ -92,24 +96,7 @@ class BallDetector(ABC):
         landmarks: Optional[dict] = None,
         prev_detection: Optional[BallDetection] = None,
     ) -> BallDetection:
-        """Detect ball in a single BGR frame.
-
-        Parameters
-        ----------
-        frame_bgr : np.ndarray
-            BGR image (H, W, 3).
-        landmarks : dict, optional
-            MediaPipe landmark dict ``{name: {x, y, visibility}}`` in
-            normalised [0, 1] coordinates.  Provided for interface
-            compatibility; YOLO does not use it internally.
-        prev_detection : BallDetection, optional
-            Detection from the immediately preceding frame.  Provided for
-            interface compatibility; YOLO does not use it internally.
-
-        Returns
-        -------
-        BallDetection
-        """
+        """Detect ball in a single BGR frame."""
 
     def detect_batch(
         self,
@@ -129,77 +116,90 @@ class BallDetector(ABC):
 
 
 # ---------------------------------------------------------------------------
-# YOLO11 detector
+# Roboflow inference-SDK detector
 # ---------------------------------------------------------------------------
 
 
-class YOLOBallDetector(BallDetector):
-    """Ball detector backed by a YOLO model (ultralytics YOLO11/YOLOv8/v9).
+class RoboflowBallDetector(BallDetector):
+    """Ball detector backed by a Roboflow basketball-specific model.
 
-    By default uses the COCO ``sports ball`` class (class 32).  When using a
-    custom basketball checkpoint, set ``target_class=0`` (first class) or
-    ``target_class=None`` to accept the highest-confidence detection regardless
-    of class.
+    Uses the ``inference`` SDK from Roboflow.  On the first call the ONNX
+    model weights are downloaded from Roboflow and cached locally under
+    ``~/.inference/``.  All subsequent frames run **local inference** with no
+    further network I/O.
+
+    Default model
+    -------------
+    project  : basketball-xil7x  (cricket-qnb5l workspace)
+    version  : 1
+    classes  : ["ball"]  (the model also detects "rim" and "human"; we filter
+                          to "ball" only)
 
     Parameters
     ----------
-    model_path : str
-        Path to model weights file or a hub model name.
-
-        - Simple name (no path separators), e.g. ``"yolo11n.pt"``: ultralytics
-          downloads it on first use from the ultralytics hub.
-        - Absolute or relative path, e.g. ``"/models/basketball.pt"``: the file
-          must exist; a clear ``FileNotFoundError`` is raised otherwise.
-
+    api_key : str, optional
+        Roboflow API key.  Falls back to the ``ROBOFLOW_API_KEY`` environment
+        variable.  Required only for the initial weight download.
+    project_id : str
+        Roboflow project slug.
+    version : int
+        Model version number.
     confidence_threshold : float
-        Minimum YOLO confidence to accept a detection.
-    device : str
-        PyTorch device string (``"cpu"``, ``"cuda"``, ``"mps"``).
-    iou_threshold : float
-        Non-maximum suppression IoU threshold.
-    imgsz : int
-        Inference image size (long edge in pixels).
-    target_class : int or None
-        YOLO class index to filter on.
+        Minimum confidence to accept a detection.
+    target_classes : list of str, optional
+        Accepted class names.  Defaults to ``["ball"]`` for xil7x.
 
-        - ``32`` (default) → COCO ``sports ball``
-        - ``0`` → first class in a custom single-class basketball model
-        - ``None`` → accept highest-confidence detection regardless of class
+    Setup
+    -----
+    pip install inference
+    export ROBOFLOW_API_KEY=<your-key>
     """
 
     def __init__(
         self,
-        model_path: str = "yolo11n.pt",
+        api_key: Optional[str] = None,
+        project_id: str = _ROBOFLOW_DEFAULT_PROJECT,
+        version: int = _ROBOFLOW_DEFAULT_VERSION,
         confidence_threshold: float = 0.20,
-        device: str = "cpu",
-        iou_threshold: float = 0.45,
-        imgsz: int = 640,
-        target_class: Optional[int] = _SPORTS_BALL_CLASS,
+        target_classes: Optional[List[str]] = None,
     ):
-        try:
-            from ultralytics import YOLO  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "YOLOBallDetector requires ultralytics: pip install ultralytics"
-            ) from exc
-
-        # Validate explicit paths (those with directory separators) before loading.
-        # Simple names like "yolo11n.pt" are handled by ultralytics (auto-download).
-        p = Path(model_path)
-        if p.parent != Path(".") and not p.exists():
-            raise FileNotFoundError(
-                f"YOLO model weights not found: {model_path}\n"
-                "Provide a valid path to a .pt file, or a model name that "
-                "ultralytics can download (e.g. 'yolo11n.pt')."
+        self.api_key = api_key or os.environ.get("ROBOFLOW_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "RoboflowBallDetector requires a Roboflow API key.\n"
+                "Pass api_key=... or set the ROBOFLOW_API_KEY environment variable.\n"
+                "Get a free key at https://app.roboflow.com"
             )
 
-        logger.info("Loading YOLO model: %s on %s", model_path, device)
-        self.model = YOLO(model_path)
-        self.model.to(device)
+        self.project_id           = project_id
+        self.version              = version
         self.confidence_threshold = confidence_threshold
-        self.iou_threshold = iou_threshold
-        self.imgsz = imgsz
-        self.target_class = target_class
+        # Default: filter to "ball" class for xil7x
+        self.target_classes = (
+            target_classes if target_classes is not None
+            else list(_ROBOFLOW_DEFAULT_CLASSES)
+        )
+
+        self._model = self._load_model()
+
+    def _load_model(self):
+        try:
+            from inference import get_model  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "RoboflowBallDetector requires the inference SDK:\n"
+                "  pip install inference\n"
+                "See https://inference.roboflow.com for details."
+            ) from exc
+
+        model_id = f"{self.project_id}/{self.version}"
+        logger.info(
+            "Loading Roboflow ball model %s (api_key=***%s)",
+            model_id, self.api_key[-4:],
+        )
+        model = get_model(model_id=model_id, api_key=self.api_key)
+        logger.info("Roboflow ball model ready: %s", model_id)
+        return model
 
     def detect(
         self,
@@ -207,44 +207,46 @@ class YOLOBallDetector(BallDetector):
         landmarks: Optional[dict] = None,
         prev_detection: Optional[BallDetection] = None,
     ) -> BallDetection:
-        results = self.model(
+        results = self._model.infer(
             frame_bgr,
-            verbose=False,
-            conf=self.confidence_threshold,
-            iou=self.iou_threshold,
-            imgsz=self.imgsz,
+            confidence=self.confidence_threshold,
         )
 
         best_conf = 0.0
-        best_box = None
-        best_cls_name: Optional[str] = None
+        best_pred = None
 
         for r in results:
-            for box in r.boxes:
-                cls_idx = int(box.cls[0])
-                conf = float(box.conf[0])
-                if self.target_class is not None and cls_idx != self.target_class:
+            preds = getattr(r, "predictions", [])
+            for pred in preds:
+                cls  = getattr(pred, "class_name", "") or ""
+                conf = float(getattr(pred, "confidence", 0.0))
+                if cls not in self.target_classes:
+                    continue
+                if conf < self.confidence_threshold:
                     continue
                 if conf > best_conf:
                     best_conf = conf
-                    best_box = box.xyxy[0].cpu().numpy()
-                    names = getattr(r, "names", {})
-                    best_cls_name = names.get(cls_idx)
+                    best_pred = pred
 
-        if best_box is None:
+        if best_pred is None:
             return BallDetection()
 
-        x1, y1, x2, y2 = best_box
-        cx = float((x1 + x2) / 2.0)
-        cy = float((y1 + y2) / 2.0)
-        radius = float(max(x2 - x1, y2 - y1) / 2.0)
+        cx = float(best_pred.x)
+        cy = float(best_pred.y)
+        w  = float(best_pred.width)
+        h  = float(best_pred.height)
+        x1 = int(cx - w / 2)
+        y1 = int(cy - h / 2)
+        x2 = int(cx + w / 2)
+        y2 = int(cy + h / 2)
+
         return BallDetection(
-            detected=True,
-            bbox=(int(x1), int(y1), int(x2), int(y2)),
-            center=(cx, cy),
-            radius=radius,
-            confidence=best_conf,
-            class_label=best_cls_name,
+            detected    = True,
+            bbox        = (x1, y1, x2, y2),
+            center      = (cx, cy),
+            radius      = max(w, h) / 2.0,
+            confidence  = best_conf,
+            class_label = getattr(best_pred, "class_name", None),
         )
 
 
@@ -253,28 +255,30 @@ class YOLOBallDetector(BallDetector):
 # ---------------------------------------------------------------------------
 
 
-def create_ball_detector(method: str = "yolo", **kwargs) -> BallDetector:
-    """Return a BallDetector for the given method name.
+def create_ball_detector(method: str = "roboflow", **kwargs) -> BallDetector:
+    """Return a :class:`RoboflowBallDetector`.
 
     Parameters
     ----------
     method : str
-        Only ``"yolo"`` is supported.
+        Only ``"roboflow"`` is supported.  Passing any other value raises
+        ``ValueError``.
     **kwargs
-        Forwarded to ``YOLOBallDetector.__init__``.
+        Forwarded to :class:`RoboflowBallDetector.__init__`.
 
     Returns
     -------
-    BallDetector
+    RoboflowBallDetector
 
     Raises
     ------
     ValueError
-        If *method* is not ``"yolo"``.
+        If *method* is not ``"roboflow"``.
     """
-    method = method.lower()
-    if method == "yolo":
-        return YOLOBallDetector(**kwargs)
-    raise ValueError(
-        f"Unknown ball detector method: {method!r}. Only 'yolo' is supported."
-    )
+    if method.lower() != "roboflow":
+        raise ValueError(
+            f"Unknown ball detector method: {method!r}.\n"
+            "Only 'roboflow' is supported (xil7x model by default).\n"
+            "Example: create_ball_detector('roboflow', api_key='...')"
+        )
+    return RoboflowBallDetector(**kwargs)

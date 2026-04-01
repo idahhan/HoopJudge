@@ -86,7 +86,10 @@ class MediaPipePoseExtractor(BasePoseExtractor):
 
             resolved_path = _ensure_model(self.model_path)
             options = PoseLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=resolved_path),
+                base_options=BaseOptions(
+                    model_asset_path=resolved_path,
+                    delegate=BaseOptions.Delegate.CPU,
+                ),
                 running_mode=RunningMode.VIDEO,
                 num_poses=1,
                 min_pose_detection_confidence=self.min_detection_confidence,
