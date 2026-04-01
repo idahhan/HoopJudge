@@ -493,6 +493,18 @@ def refine_handler_pose(
         if "frame_idx" in r
     }
 
+    # ── Ambiguity index (if available from compute_ambiguity step) ───────────
+    ambiguity_index: Dict[int, Dict] = {
+        r["frame_idx"]: r
+        for r in data.get("ambiguity", {}).get("per_frame", [])
+        if "frame_idx" in r
+    }
+    use_ambiguity = bool(ambiguity_index)
+    if use_ambiguity:
+        logger.info("track_pose: routing via ambiguity stage (%d records)", len(ambiguity_index))
+    else:
+        logger.info("track_pose: no ambiguity data; using internal HardFrameDetector")
+
     # ── Build person detector if needed ─────────────────────────────────────
     if person_detector is None:
         from .detectors.person_detector import create_person_detector
@@ -593,11 +605,47 @@ def refine_handler_pose(
             else:
                 all_wrist_px.append(None)
 
-        # ── Hard-frame detection ─────────────────────────────────────────────
-        is_hard, reasons = hard_detector.check(
-            handler_bbox, other_bboxes, ball_ctr,
-            all_wrist_px, raw_arr, state.current_smoothed(),
-        )
+        # ── Hard-frame / routing decision ────────────────────────────────────
+        # Prefer ambiguity-stage routing if available; fall back to internal
+        # HardFrameDetector otherwise.
+        pose_mode: str   = "normal"   # "normal" | "refined" | "carry_forward"
+        is_hard:   bool  = False
+        reasons:   Dict[str, bool] = {
+            "overlap": False, "pose_jump": False,
+            "lower_body": False, "ball_proximity": False,
+        }
+
+        if use_ambiguity:
+            amb_rec  = ambiguity_index.get(fidx, {})
+            pose_mode = amb_rec.get("recommended_pose_mode", "normal")
+            amb_state = amb_rec.get("state", "clear")
+            is_hard   = pose_mode != "normal"
+            # Populate reasons from ambiguity signals for the diag / overlay
+            signals = amb_rec.get("signals", {})
+            cfg_thr  = data.get("ambiguity", {}).get("config", {})
+            ov_thr   = cfg_thr.get("bbox_overlap_threshold", 0.15)
+            jmp_thr  = cfg_thr.get("pose_jump_threshold", 0.06)
+            reasons["overlap"]   = signals.get("bbox_overlap",   0.0) > ov_thr
+            reasons["pose_jump"] = signals.get("pose_jump",      0.0) > jmp_thr
+            lb_inst  = signals.get("lower_body_instability", 0.0)
+            lb_frac  = cfg_thr.get("lower_body_fraction_bad", 0.50)
+            reasons["lower_body"] = lb_inst > lb_frac
+            # add ambiguity state to diag for renderer
+            diag["ambiguity_state"] = amb_state
+            diag["ambiguity_score"] = amb_rec.get("score", 0.0)
+        else:
+            is_hard, reasons = hard_detector.check(
+                handler_bbox, other_bboxes, ball_ctr,
+                all_wrist_px, raw_arr, state.current_smoothed(),
+            )
+            pose_mode = "carry_forward" if is_hard else "normal"
+            # For internal detection: prefer refined crop over carry when overlap/jump
+            if is_hard and (reasons["overlap"] or reasons["pose_jump"]):
+                pose_mode = "refined"
+            diag["ambiguity_state"] = "occluded" if pose_mode == "carry_forward" else (
+                "overlap" if is_hard else "clear"
+            )
+            diag["ambiguity_score"] = 1.0 if not is_hard else 0.5
 
         diag["is_hard"] = is_hard
         diag["reasons"] = reasons
@@ -605,21 +653,20 @@ def refine_handler_pose(
         if reasons["overlap"]:      n_hard_overlap += 1
         if reasons["pose_jump"]:    n_hard_jump    += 1
         if reasons["lower_body"]:   n_hard_lower   += 1
-        if reasons["ball_proximity"]: n_hard_ball  += 1
+        if reasons.get("ball_proximity"): n_hard_ball += 1
 
         # ── Determine final pose ─────────────────────────────────────────────
         final_arr: Optional[np.ndarray] = None
         source: str = "global_pose"
 
-        if not is_hard:
+        if pose_mode == "normal":
             # Normal frame — trust the current observation, update state
             final_arr = state.observe(raw_arr, fidx)
             source    = "global_pose"
             n_normal += 1
 
-        else:
-            # Hard frame — try crop-pose refinement first
-            # Seek video to this frame
+        elif pose_mode == "refined":
+            # Prefer crop-pose; fall back to carry-forward then raw global
             if video_frame_idx != fidx:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
                 video_frame_idx = fidx
@@ -635,7 +682,6 @@ def refine_handler_pose(
                 )
 
             if refined_arr is not None:
-                # Crop succeeded — use it as the new observation
                 final_arr = state.observe(refined_arr, fidx)
                 source    = "refined_crop_pose"
                 diag["crop_accepted"] = True
@@ -643,7 +689,6 @@ def refine_handler_pose(
                 logger.debug("f%04d  T%d  crop pose accepted (conf=%.3f)",
                              fidx, track_id, _mean_visible_conf(refined_arr))
             else:
-                # Crop failed or skipped — try carry-forward
                 if ret:
                     n_crop_fail += 1
                 carried, ok = state.carry_forward()
@@ -651,14 +696,46 @@ def refine_handler_pose(
                     final_arr = carried
                     source    = "carry_forward"
                     n_carry  += 1
-                    logger.debug("f%04d  T%d  carry-forward (count=%d)",
+                    logger.debug("f%04d  T%d  carry-forward after crop fail (count=%d)",
                                  fidx, track_id, state._carry_count)
                 else:
-                    # Exceeded carry limit or no history — fall back to raw
                     final_arr = state.observe(raw_arr, fidx)
                     source    = "global_pose_fallback"
-                    logger.debug("f%04d  T%d  carry exceeded; using raw global",
-                                 fidx, track_id)
+                    logger.debug("f%04d  T%d  carry exceeded; using raw global", fidx, track_id)
+
+        else:  # pose_mode == "carry_forward"
+            # Ambiguity stage says: do not commit new pose observation
+            carried, ok = state.carry_forward()
+            if ok and carried is not None:
+                final_arr = carried
+                source    = "carry_forward"
+                n_carry  += 1
+                logger.debug("f%04d  T%d  carry-forward (ambiguity=%s, count=%d)",
+                             fidx, track_id,
+                             diag.get("ambiguity_state", "?"), state._carry_count)
+            else:
+                # Carry limit exceeded — attempt crop as last resort
+                if video_frame_idx != fidx:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+                    video_frame_idx = fidx
+                ret, frame_bgr = cap.read()
+                video_frame_idx += 1
+                if ret and frame_bgr is not None:
+                    diag["crop_attempted"] = True
+                    crop_last = _run_crop_pose(
+                        frame_bgr, handler_bbox, person_detector, cfg, frame_w, frame_h,
+                    )
+                    if crop_last is not None:
+                        final_arr = state.observe(crop_last, fidx)
+                        source    = "refined_crop_pose"
+                        diag["crop_accepted"] = True
+                        n_crop_ok += 1
+                    else:
+                        n_crop_fail += 1
+                if final_arr is None:
+                    final_arr = state.observe(raw_arr, fidx)
+                    source    = "global_pose_fallback"
+                    logger.debug("f%04d  T%d  carry exceeded + crop fail; using raw", fidx, track_id)
 
         # ── Write final pose back into data["frames"] ────────────────────────
         if final_arr is not None:

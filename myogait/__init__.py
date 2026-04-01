@@ -181,6 +181,10 @@ from .track_pose import (
     TrackPoseState,
     HardFrameDetector,
 )
+from .ambiguity import (
+    compute_ambiguity,
+    AmbiguityAnalyzer,
+)
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .axis_utils import (
     detect_walking_direction_from_feet,
@@ -374,6 +378,9 @@ __all__ = [
     "refine_handler_pose",
     "TrackPoseState",
     "HardFrameDetector",
+    # Ambiguity / overlap analysis
+    "compute_ambiguity",
+    "AmbiguityAnalyzer",
     # Meta
     "__version__",
 ]

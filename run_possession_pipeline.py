@@ -1,11 +1,14 @@
 """Run the full ball possession pipeline on a video.
 
 Steps:
-  1. extract  — pose landmarks via MediaPipe
-  2. select_target_player — pick the player most likely handling the ball
-  3. analyze_ball — Roboflow xil7x ball detection + tracking
-  4. track_possession — trajectory-based possession tracker
-  5. render_possession_video — debug overlay video
+  1. extract              — pose landmarks via MediaPipe / YOLO
+  2. analyze_ball         — Roboflow xil7x ball detection + tracking
+  3. select_target_player — pick the player most likely handling the ball
+  4. compute_ambiguity    — classify frames as clear/overlap/ambiguous/occluded
+  5. refine_handler_pose  — ambiguity-guided crop + EMA pose refinement
+  6. track_possession     — trajectory-based possession tracker
+  7. track_handler_identity — persistent re-id fallback
+  8. render               — combined skeleton + ball + possession debug video
 
 Usage:
     cd /Users/idahhan/myogait/myogait
@@ -42,6 +45,7 @@ from myogait import (
     extract,
     select_target_player,
     analyze_ball,
+    compute_ambiguity,
     track_possession,
     track_handler_identity,
     refine_handler_pose,
@@ -82,6 +86,11 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
     tp_index: dict = {
         r["frame_idx"]: r
         for r in data.get("track_pose", {}).get("per_frame", [])
+    }
+    # Ambiguity state per frame
+    amb_index: dict = {
+        r["frame_idx"]: r
+        for r in data.get("ambiguity", {}).get("per_frame", [])
     }
     frames_data  = data.get("frames", [])
     angles_data  = data.get("angles", {})
@@ -150,6 +159,11 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
         pose_conf    = tp_entry.get("pose_conf")
         is_hard      = tp_entry.get("is_hard", False)
         hard_reasons = tp_entry.get("reasons", {})
+
+        # Ambiguity state (clear / overlap / ambiguous / occluded)
+        amb_entry    = amb_index.get(frame_idx, {})
+        amb_state    = tp_entry.get("ambiguity_state") or amb_entry.get("state", "")
+        amb_score    = tp_entry.get("ambiguity_score") or amb_entry.get("score")
 
         # --- 2. Skeleton overlay (only when skeleton is on the possessor) ---
         if frame_idx < len(frames_data):
@@ -293,10 +307,16 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
             "carry_forward":        "CF",
             "no_handler":           "",
         }
-        src_abbr = _SRC_ABBR.get(pose_source, pose_source[:2] if pose_source else "")
-        pc_str   = f"{pose_conf:.2f}" if pose_conf is not None else "--"
+        src_abbr  = _SRC_ABBR.get(pose_source, pose_source[:2] if pose_source else "")
+        pc_str    = f"{pose_conf:.2f}" if pose_conf is not None else "--"
+        amb_str   = ""
+        if amb_state:
+            amb_abbr = {"clear": "CLR", "overlap": "OVR",
+                        "ambiguous": "AMB", "occluded": "OCC"}.get(amb_state, amb_state[:3].upper())
+            as_str   = f"{amb_score:.2f}" if amb_score is not None else "--"
+            amb_str  = f"  amb={amb_abbr}/{as_str}"
         hud_line0 = (f"f{frame_idx:04d}  {hud_id}  "
-                     f"poss={confidence:.2f}  pose={src_abbr}/{pc_str}")
+                     f"poss={confidence:.2f}  pose={src_abbr}/{pc_str}{amb_str}")
 
         # Collect active hard-frame flags for second HUD line
         flag_parts = [k[:3].upper() for k, v in hard_reasons.items() if v]
@@ -308,12 +328,19 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
             cv2.putText(frame, line, (10, 22 + li * 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, _CLR_HUD, 1, cv2.LINE_AA)
 
-        # Hard-frame border strip (bottom edge, 4px)
-        if is_hard:
-            hard_col = (0, 140, 255)   # orange = hard frame
-            if hard_reasons.get("overlap"):
-                hard_col = (0, 60, 255)   # deeper orange = overlap
-            cv2.rectangle(frame, (0, H - 4), (W, H), hard_col, -1)
+        # Ambiguity border strip (bottom edge, 5px) — color-coded by state
+        # clear=green  overlap=yellow  ambiguous=orange  occluded=red
+        _AMB_COLORS = {
+            "clear":     (0, 200,  50),    # green
+            "overlap":   (0, 220, 200),    # yellow
+            "ambiguous": (0, 130, 255),    # orange
+            "occluded":  (0,  40, 220),    # red
+        }
+        if amb_state in _AMB_COLORS:
+            cv2.rectangle(frame, (0, H - 5), (W, H), _AMB_COLORS[amb_state], -1)
+        elif is_hard:
+            # Fallback: no ambiguity stage → use old hard-frame orange
+            cv2.rectangle(frame, (0, H - 5), (W, H), (0, 130, 255), -1)
 
         # Re-id event flash (right side): RELABEL or SWITCH
         if hi_src in ("relabel", "switch"):
@@ -396,7 +423,7 @@ def main():
     # Step 2: Ball analysis (Roboflow xil7x) — runs BEFORE player selection
     #         so select_target_player can use ball proximity to pick the right player
     # ------------------------------------------------------------------
-    logger.info("Step 2/5 — Running ball detection (xil7x)")
+    logger.info("Step 2/8 — Running ball detection (xil7x)")
     ball_config = {
         "detector": "roboflow",
         "detector_kwargs": {
@@ -422,7 +449,7 @@ def main():
     # Step 3: Player selection — runs AFTER ball detection so it can use
     #         ball proximity to select the correct player
     # ------------------------------------------------------------------
-    logger.info("Step 3/7 — Selecting target player (ball-guided)")
+    logger.info("Step 3/8 — Selecting target player (ball-guided)")
     data = select_target_player(str(video_path), data)
     # player_selection re-runs YOLO on the original (unflipped) video and
     # overwrites data["frames"] landmarks in unflipped coordinate space.
@@ -432,15 +459,33 @@ def main():
         logger.info("Cleared was_flipped flag after player_selection landmark rewrite")
 
     # ------------------------------------------------------------------
-    # Step 4: Track-owned pose refinement
-    #         In overlap/contact/occlusion frames the full-frame YOLO pose
-    #         may be contaminated by adjacent players.  This step:
-    #         - detects hard frames (overlap, pose jump, lower-body missing)
-    #         - re-runs YOLO pose on a tight crop of the handler's bbox
-    #         - maintains per-track EMA-smoothed pose state
-    #         - writes the final authoritative pose back into data["frames"]
+    # Step 4: Overlap / ambiguity classification
+    #         Classifies each frame as clear / overlap / ambiguous / occluded
+    #         based on 7 signals (bbox overlap, score gap, pose jump, etc.)
+    #         and writes recommended_pose_mode for the refinement step.
     # ------------------------------------------------------------------
-    logger.info("Step 4/7 — Refining handler pose (track-owned, crop-based)")
+    logger.info("Step 4/8 — Computing ambiguity stage")
+    data = compute_ambiguity(data)
+
+    amb_summary = data.get("ambiguity", {}).get("summary", {})
+    logger.info(
+        "Ambiguity: clear=%d  overlap=%d  ambiguous=%d  occluded=%d",
+        amb_summary.get("states", {}).get("clear",     0),
+        amb_summary.get("states", {}).get("overlap",   0),
+        amb_summary.get("states", {}).get("ambiguous", 0),
+        amb_summary.get("states", {}).get("occluded",  0),
+    )
+
+    # ------------------------------------------------------------------
+    # Step 5: Track-owned pose refinement
+    #         In overlap/contact/occlusion frames the full-frame YOLO pose
+    #         may be contaminated by adjacent players.  This step reads the
+    #         recommended_pose_mode from the ambiguity stage to route:
+    #         - normal     → EMA-smooth current global observation
+    #         - refined    → crop-YOLO + EMA; fall back to carry-forward
+    #         - carry_fwd  → carry smoothed state; crop only if carry expires
+    # ------------------------------------------------------------------
+    logger.info("Step 5/8 — Refining handler pose (ambiguity-guided, track-owned)")
     data = refine_handler_pose(data, str(video_path))
 
     tp_summary = data.get("track_pose", {}).get("summary", {})
@@ -458,9 +503,9 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Step 5: Possession tracking
+    # Step 6: Possession tracking
     # ------------------------------------------------------------------
-    logger.info("Step 5/7 — Tracking possession")
+    logger.info("Step 6/8 — Tracking possession")
     data = track_possession(data)
 
     poss_summary = data.get("possession", {}).get("summary", {})
@@ -471,9 +516,9 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Step 6: Persistent handler identity (re-id fallback)
+    # Step 7: Persistent handler identity (re-id fallback)
     # ------------------------------------------------------------------
-    logger.info("Step 6/7 — Running handler identity tracker (re-id)")
+    logger.info("Step 7/8 — Running handler identity tracker (re-id)")
     data = track_handler_identity(data, str(video_path))
 
     hi_summary = data.get("handler_identity", {}).get("summary", {})
@@ -492,10 +537,10 @@ def main():
     logger.info("Enriched pivot saved → %s", enriched_path)
 
     # ------------------------------------------------------------------
-    # Step 7: Render combined skeleton + possession + gait debug video
+    # Step 8: Render combined skeleton + possession + gait debug video
     # ------------------------------------------------------------------
     debug_video = out_dir / f"{stem}_possession_debug.mp4"
-    logger.info("Step 7/7 — Rendering combined debug video → %s", debug_video.name)
+    logger.info("Step 8/8 — Rendering combined debug video → %s", debug_video.name)
     _render_combined(str(video_path), data, str(debug_video))
 
     logger.info("Done. Output: %s", debug_video)
