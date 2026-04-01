@@ -172,6 +172,10 @@ from .possession import (
     render_possession_video,
     PossessionTracker,
 )
+from .handler_identity import (
+    track_handler_identity,
+    HandlerIdentityTracker,
+)
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .axis_utils import (
     detect_walking_direction_from_feet,
@@ -358,6 +362,9 @@ __all__ = [
     "track_possession",
     "render_possession_video",
     "PossessionTracker",
+    # Handler identity
+    "track_handler_identity",
+    "HandlerIdentityTracker",
     # Meta
     "__version__",
 ]

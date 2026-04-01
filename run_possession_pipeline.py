@@ -43,6 +43,7 @@ from myogait import (
     select_target_player,
     analyze_ball,
     track_possession,
+    track_handler_identity,
     save_json,
 )
 from myogait.video import render_skeleton_frame
@@ -54,6 +55,10 @@ from myogait.possession import (
 )
 
 
+_CLR_RELABEL = (0, 220, 255)   # cyan — same player, new detector token
+_CLR_SWITCH  = (0,  80, 255)   # orange-red — genuine possession switch
+
+
 def _render_combined(video_path: str, data: dict, output_path: str) -> str:
     """Render skeleton + gait events + ball + possession overlays on one video."""
     poss    = data.get("possession", {})
@@ -61,6 +66,11 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
     ball_map = {
         f["frame_idx"]: f.get("ball", {})
         for f in data.get("ball", {}).get("per_frame", [])
+    }
+    # Handler identity (re-id) lookup
+    hi_map: dict = {
+        r["frame_idx"]: r
+        for r in data.get("handler_identity", {}).get("per_frame", [])
     }
     frames_data  = data.get("frames", [])
     angles_data  = data.get("angles", {})
@@ -106,15 +116,19 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
         if not ret:
             break
 
-        # --- 1. Possession + ball data (needed before skeleton check) ---
+        # --- 1. Possession + ball + handler identity data ---
         pr   = pf_map.get(frame_idx, {})
         ball = ball_map.get(frame_idx, {})
+        hi   = hi_map.get(frame_idx, {})
 
         bc           = ball.get("center")
         ball_tracked = ball.get("tracked", False)
         ball_src     = ball.get("source", "detected")
         poss_bbox    = pr.get("possessor_bbox")
-        poss_pid     = pr.get("possessor_player_id")
+        poss_pid     = pr.get("possessor_player_id")   # raw detector ID
+        hi_pid       = hi.get("persistent_handler_id") # persistent re-id
+        hi_src       = hi.get("handler_id_source", "")
+        hi_reid      = hi.get("reid_score")
 
         # --- 2. Skeleton overlay (only when skeleton is on the possessor) ---
         if frame_idx < len(frames_data):
@@ -204,7 +218,9 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
                           (poss_bbox[0], poss_bbox[1]),
                           (poss_bbox[2], poss_bbox[3]),
                           col, 3)
-            cv2.putText(frame, f"P{poss_pid}",
+            label_pid = (f"H{hi_pid}/P{poss_pid}" if hi_pid is not None
+                         else f"P{poss_pid}")
+            cv2.putText(frame, label_pid,
                         (poss_bbox[0], max(poss_bbox[1] - 6, 14)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
 
@@ -230,14 +246,30 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
                 cv2.putText(frame, line, (8, y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, _CLR_HUD, 1, cv2.LINE_AA)
 
-        # HUD
+        # HUD — show persistent handler ID (H#) alongside raw detector ID (P#)
         reason_short = reason[:60] + ("…" if len(reason) > 60 else "")
+        hud_id = (f"H{hi_pid}/P{poss_pid}" if hi_pid is not None
+                  else f"P{poss_pid}")
         for li, line in enumerate([
-            f"f{frame_idx:04d}  P{poss_pid}  conf={confidence:.2f}",
+            f"f{frame_idx:04d}  {hud_id}  conf={confidence:.2f}",
             reason_short,
         ]):
             cv2.putText(frame, line, (10, 22 + li * 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, _CLR_HUD, 1, cv2.LINE_AA)
+
+        # Re-id event flash (right side): RELABEL or SWITCH
+        if hi_src in ("relabel", "switch"):
+            flash_col  = _CLR_RELABEL if hi_src == "relabel" else _CLR_SWITCH
+            flash_text = f"{'RELABEL' if hi_src == 'relabel' else 'SWITCH'}"
+            if hi_reid is not None:
+                flash_text += f" {hi_reid:.2f}"
+            (fw, fh), _ = cv2.getTextSize(flash_text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            fx = W - fw - 10
+            fy = 42
+            cv2.rectangle(frame, (fx - 4, fy - fh - 4), (fx + fw + 4, fy + 4),
+                          _CLR_LABEL_BG, -1)
+            cv2.putText(frame, flash_text, (fx, fy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, flash_col, 2, cv2.LINE_AA)
 
         # Gait event flash bar (top strip when HS/TO fires this frame)
         if frame_idx in event_lookup:
@@ -355,6 +387,20 @@ def main():
     )
 
     # ------------------------------------------------------------------
+    # Step 5: Persistent handler identity (re-id layer)
+    # ------------------------------------------------------------------
+    logger.info("Step 5/6 — Running handler identity tracker (re-id)")
+    data = track_handler_identity(data, str(video_path))
+
+    hi_summary = data.get("handler_identity", {}).get("summary", {})
+    logger.info(
+        "Handler identity: %d relabels, %d switches (out of %d frames)",
+        hi_summary.get("n_relabels", 0),
+        hi_summary.get("n_switches", 0),
+        hi_summary.get("n_frames_total", 0),
+    )
+
+    # ------------------------------------------------------------------
     # Save enriched pivot JSON
     # ------------------------------------------------------------------
     enriched_path = out_dir / f"{stem}_possession.json"
@@ -362,10 +408,10 @@ def main():
     logger.info("Enriched pivot saved → %s", enriched_path)
 
     # ------------------------------------------------------------------
-    # Step 5: Render combined skeleton + possession + gait debug video
+    # Step 6: Render combined skeleton + possession + gait debug video
     # ------------------------------------------------------------------
     debug_video = out_dir / f"{stem}_possession_debug.mp4"
-    logger.info("Step 5/5 — Rendering combined debug video → %s", debug_video.name)
+    logger.info("Step 6/6 — Rendering combined debug video → %s", debug_video.name)
     _render_combined(str(video_path), data, str(debug_video))
 
     logger.info("Done. Output: %s", debug_video)
