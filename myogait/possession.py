@@ -293,8 +293,15 @@ class PossessionTracker:
         self._traj.push_ball(tuple(bc) if bc and ball_tracked else None)
 
         # --- Player identity + trajectory update ---
+        # Use ByteTrack track IDs when available (set by select_target_player);
+        # fall back to IoU-based tracking for players without a stable track ID.
         bboxes = [tuple(p["bbox"]) for p in players if p.get("bbox")]
-        pids   = self._id_tracker.update(bboxes)
+        if bboxes and all(p.get("track_id") is not None for p in players if p.get("bbox")):
+            # All players have ByteTrack IDs — use them directly
+            pids = [p["track_id"] for p in players if p.get("bbox")]
+        else:
+            # Fallback: IoU-based ID assignment
+            pids = self._id_tracker.update(bboxes)
 
         for pid, p in zip(pids, players):
             wrist_px = self._best_wrist_px(p, bc, frame_w, frame_h)

@@ -67,10 +67,15 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
         f["frame_idx"]: f.get("ball", {})
         for f in data.get("ball", {}).get("per_frame", [])
     }
-    # Handler identity (re-id) lookup
+    # Handler identity (re-id fallback) lookup
     hi_map: dict = {
         r["frame_idx"]: r
         for r in data.get("handler_identity", {}).get("per_frame", [])
+    }
+    # Player-selection per-frame index (for ByteTrack track IDs)
+    ps_index: dict = {
+        r["frame_idx"]: r
+        for r in data.get("player_selection", {}).get("per_frame", [])
     }
     frames_data  = data.get("frames", [])
     angles_data  = data.get("angles", {})
@@ -125,10 +130,14 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
         ball_tracked = ball.get("tracked", False)
         ball_src     = ball.get("source", "detected")
         poss_bbox    = pr.get("possessor_bbox")
-        poss_pid     = pr.get("possessor_player_id")   # raw detector ID
-        hi_pid       = hi.get("persistent_handler_id") # persistent re-id
+        poss_pid     = pr.get("possessor_player_id")   # possession tracker ID
+        hi_pid       = hi.get("persistent_handler_id") # re-id fallback
         hi_src       = hi.get("handler_id_source", "")
         hi_reid      = hi.get("reid_score")
+
+        # ByteTrack track ID for the selected player (primary identity)
+        ps_entry     = ps_index.get(frame_idx, {})
+        bt_track_id  = ps_entry.get("target_track_id")  # stable ByteTrack ID
 
         # --- 2. Skeleton overlay (only when skeleton is on the possessor) ---
         if frame_idx < len(frames_data):
@@ -202,24 +211,33 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
             col = tuple(int(c * alpha) for c in _CLR_TRAIL_WRIST)
             cv2.circle(frame, tp, r, col, -1)
 
-        # Non-possessor bboxes
-        for s in all_scores:
-            sb = s.get("bbox")
+        # Non-possessor players — draw their ByteTrack track IDs too
+        for p in all_scores:
+            sb = p.get("bbox")
             if sb is None:
                 continue
             if poss_bbox and _iou(tuple(sb), tuple(poss_bbox)) > 0.5:
-                continue
+                continue   # skip possessor, handled below
             cv2.rectangle(frame, (sb[0], sb[1]), (sb[2], sb[3]), _CLR_ALL, 1)
+            tid = p.get("track_id")
+            if tid is not None:
+                cv2.putText(frame, f"T{tid}",
+                            (sb[0], max(sb[1] - 4, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, _CLR_ALL, 1, cv2.LINE_AA)
 
-        # Possessor bbox
+        # Possessor bbox — show ByteTrack ID (T#) as primary label
         if poss_bbox:
             col = _conf_color(confidence)
             cv2.rectangle(frame,
                           (poss_bbox[0], poss_bbox[1]),
                           (poss_bbox[2], poss_bbox[3]),
                           col, 3)
-            label_pid = (f"H{hi_pid}/P{poss_pid}" if hi_pid is not None
-                         else f"P{poss_pid}")
+            if bt_track_id is not None:
+                label_pid = f"T{bt_track_id}"   # ByteTrack is primary
+            elif hi_pid is not None:
+                label_pid = f"H{hi_pid}/P{poss_pid}"  # re-id fallback
+            else:
+                label_pid = f"P{poss_pid}"
             cv2.putText(frame, label_pid,
                         (poss_bbox[0], max(poss_bbox[1] - 6, 14)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
@@ -246,10 +264,14 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
                 cv2.putText(frame, line, (8, y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, _CLR_HUD, 1, cv2.LINE_AA)
 
-        # HUD — show persistent handler ID (H#) alongside raw detector ID (P#)
+        # HUD — ByteTrack ID (T#) is primary; re-id fallback (H#) shown if no BT
         reason_short = reason[:60] + ("…" if len(reason) > 60 else "")
-        hud_id = (f"H{hi_pid}/P{poss_pid}" if hi_pid is not None
-                  else f"P{poss_pid}")
+        if bt_track_id is not None:
+            hud_id = f"T{bt_track_id}"
+        elif hi_pid is not None:
+            hud_id = f"H{hi_pid}/P{poss_pid}"
+        else:
+            hud_id = f"P{poss_pid}"
         for li, line in enumerate([
             f"f{frame_idx:04d}  {hud_id}  conf={confidence:.2f}",
             reason_short,

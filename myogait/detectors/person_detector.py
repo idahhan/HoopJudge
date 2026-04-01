@@ -65,6 +65,7 @@ class PersonDetection:
     confidence: float
     keypoints_norm: Optional[np.ndarray] = field(default=None, repr=False)
     area: int = field(init=False)
+    track_id: Optional[int] = field(default=None)
 
     def __post_init__(self) -> None:
         x1, y1, x2, y2 = self.bbox
@@ -122,6 +123,7 @@ class PersonDetection:
             "bbox":       list(self.bbox),
             "confidence": round(float(self.confidence), 4),
             "area":       int(self.area),
+            "track_id":   self.track_id,
         }
         if self.keypoints_norm is not None:
             elbows = self.elbows_norm

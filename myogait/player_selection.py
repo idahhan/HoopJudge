@@ -172,6 +172,17 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     # ---- Lower-body event detection ----------------------------------------
     "run_events": True,
     "events_method": "zeni",
+    # ---- ByteTrack person tracking -----------------------------------------
+    # Set to True to run ByteTrack over per-frame detections and assign stable
+    # track IDs.  When disabled, persons keep track_id=None.
+    "use_bytetrack": True,
+    "bytetrack": {
+        "track_activation_threshold": 0.25,  # min conf to activate a new track
+        "lost_track_buffer":          45,    # frames to keep a lost track alive
+        "minimum_matching_threshold": 0.70,  # IoU threshold for matching
+        "minimum_consecutive_frames": 1,     # frames before track is confirmed
+        "min_box_area":               200,   # ignore tiny detections (px²)
+    },
 }
 
 
@@ -403,6 +414,8 @@ class FrameAssignment:
     target_keypoints_norm: Optional[np.ndarray] = field(default=None, repr=False)
     # Per-component score breakdown
     score_breakdown:       Optional[Dict[str, float]] = None
+    # Stable ByteTrack track ID for the selected player (None if unavailable)
+    target_track_id:       Optional[int] = None
     # Filled by smooth_assignments():
     smoothed_bbox:         Optional[Tuple[int, int, int, int]] = None
     smoothed_source:       str = "none"   # + "temporal"
@@ -498,6 +511,7 @@ def assign_target_player(
         result.target_score          = best_comp["score"]
         result.target_source         = "ball_proximity"
         result.target_keypoints_norm = best_person.keypoints_norm
+        result.target_track_id       = best_person.track_id
         result.score_breakdown       = best_comp
 
     else:
@@ -520,6 +534,7 @@ def assign_target_player(
                 result.target_score          = best_iou
                 result.target_source         = "tracked_no_ball"
                 result.target_keypoints_norm = best_match.keypoints_norm
+                result.target_track_id       = best_match.track_id
                 return result
 
         # No prev bbox or no IoU match — fall back to highest-confidence player
@@ -529,6 +544,7 @@ def assign_target_player(
             result.target_score          = best.confidence
             result.target_source         = "highest_confidence"
             result.target_keypoints_norm = best.keypoints_norm
+            result.target_track_id       = best.track_id
 
     return result
 
@@ -926,6 +942,25 @@ def select_target_player(
             **cfg.get("person_detector_kwargs", {}),
         )
 
+    # Build ByteTrack person tracker (optional)
+    byte_tracker = None
+    if cfg.get("use_bytetrack", True):
+        try:
+            from .trackers import PersonByteTracker, TrackerConfig
+            bt_cfg_dict = cfg.get("bytetrack", {})
+            bt_cfg = TrackerConfig(
+                track_activation_threshold = bt_cfg_dict.get("track_activation_threshold", 0.25),
+                lost_track_buffer          = bt_cfg_dict.get("lost_track_buffer", 45),
+                minimum_matching_threshold = bt_cfg_dict.get("minimum_matching_threshold", 0.70),
+                minimum_consecutive_frames = bt_cfg_dict.get("minimum_consecutive_frames", 1),
+                min_box_area               = bt_cfg_dict.get("min_box_area", 200),
+            )
+            byte_tracker = PersonByteTracker(bt_cfg, fps=fps)
+            logger.info("ByteTrack person tracker initialised (buffer=%d frames)",
+                        bt_cfg.lost_track_buffer)
+        except Exception as exc:
+            logger.warning("ByteTrack unavailable (%s) — falling back to IoU tracking", exc)
+
     # Collect tracked ball positions
     ball_per_frame: List[BallDetection] = []
     if "ball" in data and "per_frame" in data["ball"]:
@@ -968,6 +1003,8 @@ def select_target_player(
                 continue
 
             persons = person_detector.detect(frame_bgr)
+            if byte_tracker is not None:
+                persons = byte_tracker.update(persons)
             ball    = ball_per_frame[idx] if idx < len(ball_per_frame) else BallDetection()
             asgn    = assign_target_player(
                 persons, ball, frame_w, frame_h,
@@ -1029,6 +1066,7 @@ def select_target_player(
             "target_bbox":     list(asgn.target_bbox)    if asgn.target_bbox    else None,
             "target_score":    round(asgn.target_score, 4),
             "target_source":   asgn.target_source,
+            "target_track_id": asgn.target_track_id,
             "score_breakdown": {k: round(v, 4) for k, v in asgn.score_breakdown.items()}
                                if asgn.score_breakdown else None,
             "smoothed_bbox":   list(asgn.smoothed_bbox)  if asgn.smoothed_bbox  else None,
