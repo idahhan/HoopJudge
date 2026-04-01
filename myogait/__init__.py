@@ -176,6 +176,11 @@ from .handler_identity import (
     track_handler_identity,
     HandlerIdentityTracker,
 )
+from .track_pose import (
+    refine_handler_pose,
+    TrackPoseState,
+    HardFrameDetector,
+)
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .axis_utils import (
     detect_walking_direction_from_feet,
@@ -365,6 +370,10 @@ __all__ = [
     # Handler identity
     "track_handler_identity",
     "HandlerIdentityTracker",
+    # Track-owned pose refinement
+    "refine_handler_pose",
+    "TrackPoseState",
+    "HardFrameDetector",
     # Meta
     "__version__",
 ]

@@ -44,6 +44,7 @@ from myogait import (
     analyze_ball,
     track_possession,
     track_handler_identity,
+    refine_handler_pose,
     save_json,
 )
 from myogait.video import render_skeleton_frame
@@ -76,6 +77,11 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
     ps_index: dict = {
         r["frame_idx"]: r
         for r in data.get("player_selection", {}).get("per_frame", [])
+    }
+    # Track-pose diagnostics (pose source, hard-frame flags)
+    tp_index: dict = {
+        r["frame_idx"]: r
+        for r in data.get("track_pose", {}).get("per_frame", [])
     }
     frames_data  = data.get("frames", [])
     angles_data  = data.get("angles", {})
@@ -135,9 +141,15 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
         hi_src       = hi.get("handler_id_source", "")
         hi_reid      = hi.get("reid_score")
 
-        # ByteTrack track ID for the selected player (primary identity)
+        # ByteTrack track ID + track-pose diagnostics
         ps_entry     = ps_index.get(frame_idx, {})
         bt_track_id  = ps_entry.get("target_track_id")  # stable ByteTrack ID
+
+        tp_entry     = tp_index.get(frame_idx, {})
+        pose_source  = tp_entry.get("pose_source", "")   # global/crop/carry/none
+        pose_conf    = tp_entry.get("pose_conf")
+        is_hard      = tp_entry.get("is_hard", False)
+        hard_reasons = tp_entry.get("reasons", {})
 
         # --- 2. Skeleton overlay (only when skeleton is on the possessor) ---
         if frame_idx < len(frames_data):
@@ -265,19 +277,43 @@ def _render_combined(video_path: str, data: dict, output_path: str) -> str:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, _CLR_HUD, 1, cv2.LINE_AA)
 
         # HUD — ByteTrack ID (T#) is primary; re-id fallback (H#) shown if no BT
-        reason_short = reason[:60] + ("…" if len(reason) > 60 else "")
+        reason_short = reason[:55] + ("…" if len(reason) > 55 else "")
         if bt_track_id is not None:
             hud_id = f"T{bt_track_id}"
         elif hi_pid is not None:
             hud_id = f"H{hi_pid}/P{poss_pid}"
         else:
             hud_id = f"P{poss_pid}"
-        for li, line in enumerate([
-            f"f{frame_idx:04d}  {hud_id}  conf={confidence:.2f}",
-            reason_short,
-        ]):
+
+        # Pose source abbreviation for HUD
+        _SRC_ABBR = {
+            "global_pose":          "G",
+            "global_pose_fallback": "G!",
+            "refined_crop_pose":    "C",
+            "carry_forward":        "CF",
+            "no_handler":           "",
+        }
+        src_abbr = _SRC_ABBR.get(pose_source, pose_source[:2] if pose_source else "")
+        pc_str   = f"{pose_conf:.2f}" if pose_conf is not None else "--"
+        hud_line0 = (f"f{frame_idx:04d}  {hud_id}  "
+                     f"poss={confidence:.2f}  pose={src_abbr}/{pc_str}")
+
+        # Collect active hard-frame flags for second HUD line
+        flag_parts = [k[:3].upper() for k, v in hard_reasons.items() if v]
+        hud_line1  = reason_short
+        if flag_parts:
+            hud_line1 = "[" + " ".join(flag_parts) + "] " + reason_short
+
+        for li, line in enumerate([hud_line0, hud_line1]):
             cv2.putText(frame, line, (10, 22 + li * 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, _CLR_HUD, 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, _CLR_HUD, 1, cv2.LINE_AA)
+
+        # Hard-frame border strip (bottom edge, 4px)
+        if is_hard:
+            hard_col = (0, 140, 255)   # orange = hard frame
+            if hard_reasons.get("overlap"):
+                hard_col = (0, 60, 255)   # deeper orange = overlap
+            cv2.rectangle(frame, (0, H - 4), (W, H), hard_col, -1)
 
         # Re-id event flash (right side): RELABEL or SWITCH
         if hi_src in ("relabel", "switch"):
@@ -386,7 +422,7 @@ def main():
     # Step 3: Player selection — runs AFTER ball detection so it can use
     #         ball proximity to select the correct player
     # ------------------------------------------------------------------
-    logger.info("Step 3/5 — Selecting target player (ball-guided)")
+    logger.info("Step 3/7 — Selecting target player (ball-guided)")
     data = select_target_player(str(video_path), data)
     # player_selection re-runs YOLO on the original (unflipped) video and
     # overwrites data["frames"] landmarks in unflipped coordinate space.
@@ -396,9 +432,35 @@ def main():
         logger.info("Cleared was_flipped flag after player_selection landmark rewrite")
 
     # ------------------------------------------------------------------
-    # Step 4: Possession tracking
+    # Step 4: Track-owned pose refinement
+    #         In overlap/contact/occlusion frames the full-frame YOLO pose
+    #         may be contaminated by adjacent players.  This step:
+    #         - detects hard frames (overlap, pose jump, lower-body missing)
+    #         - re-runs YOLO pose on a tight crop of the handler's bbox
+    #         - maintains per-track EMA-smoothed pose state
+    #         - writes the final authoritative pose back into data["frames"]
     # ------------------------------------------------------------------
-    logger.info("Step 4/5 — Tracking possession")
+    logger.info("Step 4/7 — Refining handler pose (track-owned, crop-based)")
+    data = refine_handler_pose(data, str(video_path))
+
+    tp_summary = data.get("track_pose", {}).get("summary", {})
+    logger.info(
+        "Track pose: %d/%d hard frames "
+        "(overlap=%d jump=%d lower=%d) | crop_ok=%d fail=%d carry=%d",
+        tp_summary.get("n_hard_frames", 0),
+        tp_summary.get("n_frames", 0),
+        tp_summary.get("n_hard_overlap", 0),
+        tp_summary.get("n_hard_jump", 0),
+        tp_summary.get("n_hard_lower_body", 0),
+        tp_summary.get("n_crop_ok", 0),
+        tp_summary.get("n_crop_fail", 0),
+        tp_summary.get("n_carry_forward", 0),
+    )
+
+    # ------------------------------------------------------------------
+    # Step 5: Possession tracking
+    # ------------------------------------------------------------------
+    logger.info("Step 5/7 — Tracking possession")
     data = track_possession(data)
 
     poss_summary = data.get("possession", {}).get("summary", {})
@@ -409,9 +471,9 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Step 5: Persistent handler identity (re-id layer)
+    # Step 6: Persistent handler identity (re-id fallback)
     # ------------------------------------------------------------------
-    logger.info("Step 5/6 — Running handler identity tracker (re-id)")
+    logger.info("Step 6/7 — Running handler identity tracker (re-id)")
     data = track_handler_identity(data, str(video_path))
 
     hi_summary = data.get("handler_identity", {}).get("summary", {})
@@ -430,10 +492,10 @@ def main():
     logger.info("Enriched pivot saved → %s", enriched_path)
 
     # ------------------------------------------------------------------
-    # Step 6: Render combined skeleton + possession + gait debug video
+    # Step 7: Render combined skeleton + possession + gait debug video
     # ------------------------------------------------------------------
     debug_video = out_dir / f"{stem}_possession_debug.mp4"
-    logger.info("Step 6/6 — Rendering combined debug video → %s", debug_video.name)
+    logger.info("Step 7/7 — Rendering combined debug video → %s", debug_video.name)
     _render_combined(str(video_path), data, str(debug_video))
 
     logger.info("Done. Output: %s", debug_video)
