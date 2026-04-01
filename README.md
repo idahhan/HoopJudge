@@ -20,9 +20,20 @@ HoopJudge adds a full basketball possession pipeline on top of the myogait pose 
 
 ### Demo
 
+**v2 — Multi-player: ball-guided player selection + gait analysis + possession tracking**
+
+[![Possession + gait debug overlay](media/possession_debug.gif)](media/possession_debug.gif)
+
+> Combined overlay: skeleton tracks the ball handler (not just the largest player), gait events (heel strikes/toe-offs) fire on the correct person, ball trail (orange = detected, yellow = interpolated), possession scoring HUD.
+
+<details>
+<summary>v1 — Single-player ball detection (earlier demo)</summary>
+
 [![Ball possession debug overlay](media/output.gif)](media/trimmed-_ball_debug.mp4)
 
-> Click the GIF to download the full debug video. Orange circle = YOLO detection, yellow = interpolated gap fill.
+> Orange circle = YOLO detection, yellow = interpolated gap fill.
+
+</details>
 
 ### Quick Start
 
